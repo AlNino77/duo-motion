@@ -104,18 +104,20 @@ public final class AppSettings: ObservableObject {
     private init() {
         let defaults = UserDefaults.standard
         
-        // Defaults matching User Preferences
+        // Defaults tuned to the iPhone Duo-style physical fold illusion.
+        // Main spatial deformation starts near 90°, then reaches full depth around 60°.
+        // endTiltAngle is reserved for the final fade into black near physical closure.
         self.hasCompletedOnboarding = defaults.bool(forKey: kHasCompletedOnboarding)
-        self.startTiltAngle = defaults.object(forKey: kStartTiltAngle) != nil ? defaults.double(forKey: kStartTiltAngle) : 115.0
-        self.endTiltAngle = defaults.object(forKey: kEndTiltAngle) != nil ? defaults.double(forKey: kEndTiltAngle) : 3.0
-        self.followSpeed = defaults.object(forKey: kFollowSpeed) != nil ? defaults.double(forKey: kFollowSpeed) : 16.0
+        self.startTiltAngle = defaults.object(forKey: kStartTiltAngle) != nil ? defaults.double(forKey: kStartTiltAngle) : 92.0
+        self.endTiltAngle = defaults.object(forKey: kEndTiltAngle) != nil ? defaults.double(forKey: kEndTiltAngle) : 18.0
+        self.followSpeed = defaults.object(forKey: kFollowSpeed) != nil ? defaults.double(forKey: kFollowSpeed) : 20.0
         
         let savedSource = defaults.integer(forKey: kImageSourceMode)
         self.imageSourceMode = defaults.object(forKey: kImageSourceMode) != nil ? (ImageSourceMode(rawValue: savedSource) ?? .liveCapture) : .liveCapture
         
         self.customImagePath = defaults.string(forKey: kCustomImagePath) ?? ""
-        self.blurStrength = defaults.object(forKey: kBlurStrength) != nil ? defaults.double(forKey: kBlurStrength) : 0.5
-        self.reflectionIntensity = defaults.object(forKey: kReflectionIntensity) != nil ? defaults.double(forKey: kReflectionIntensity) : 0.0
+        self.blurStrength = defaults.object(forKey: kBlurStrength) != nil ? defaults.double(forKey: kBlurStrength) : 1.0
+        self.reflectionIntensity = defaults.object(forKey: kReflectionIntensity) != nil ? defaults.double(forKey: kReflectionIntensity) : 0.6
         
         self.showAngleInMenuBar = defaults.object(forKey: kShowAngleInMenuBar) != nil ? defaults.bool(forKey: kShowAngleInMenuBar) : true
         self.enableLockScreenPriority = defaults.object(forKey: kEnableLockScreenPriority) != nil ? defaults.bool(forKey: kEnableLockScreenPriority) : true
@@ -146,7 +148,8 @@ public final class AppSettings: ObservableObject {
         }
     }
     
-    /// Calculate normalized turn (0.0 to 1.0) across the entire folding range (closing, opening, or stopped)
+    /// Calculate normalized turn (0.0 to 1.0) across the entire physical closing range.
+    /// The Duo visual layer remaps this physical progress into a faster 90°→60° effect curve.
     public func normalizedTurn(for angle: Double) -> Double {
         if isTestModeActive {
             return min(1.0, max(0.0, testTurnValue))
