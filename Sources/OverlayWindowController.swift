@@ -14,6 +14,7 @@ public final class OverlayWindowController: NSObject {
     private var metalView: MetalFoldView?
     private var isCapturing = false
     private var overlayLatched = false
+    private var preArmCapturedThisMotion = false
     private var lastRawAngle: Double?
     private var motionDirection: MotionDirection = .idle
     
@@ -22,7 +23,8 @@ public final class OverlayWindowController: NSObject {
         setupWindow()
         setupSleepObservers()
         
-        // Connect intelligent hardware pre-arming.
+        // Keep the upstream pre-arm hook as a compatible fallback. This controller also
+        // pre-arms directly from the raw angle so capture can happen before the visual trigger.
         LidSensor.shared.onPreArmCapture = { [weak self] in
             self?.captureScreenAsync()
         }
@@ -48,6 +50,7 @@ public final class OverlayWindowController: NSObject {
         metalView?.isPaused = true
         window?.alphaValue = 0.0
         overlayLatched = false
+        preArmCapturedThisMotion = false
         lastRawAngle = nil
         motionDirection = .idle
         AppSettings.shared.isScreenCaptureDormant = true
@@ -58,6 +61,7 @@ public final class OverlayWindowController: NSObject {
         // is still inside the effect range, update(turn:angle:) will latch it immediately
         // and play the opening motion from the physical sensor position.
         overlayLatched = false
+        preArmCapturedThisMotion = false
         lastRawAngle = nil
         motionDirection = .idle
         
@@ -103,7 +107,6 @@ public final class OverlayWindowController: NSObject {
         self.window = win
         self.metalView = mtkView
         
-        // One-time initial image load in background during app launch.
         Task {
             if let img = await ScreenCapture.shared.fetchImage() {
                 await MainActor.run {
@@ -121,20 +124,30 @@ public final class OverlayWindowController: NSObject {
         let settings = AppSettings.shared
         updateMotionDirection(with: angle)
         
-        // The upstream app maps the entire physical close into 0...1. Duo motion is
-        // intentionally front-loaded: the spatial fold reaches full depth around 60°,
-        // while the remaining travel is reserved for the dark horizon / final blackout.
         let startAngle = settings.startTiltAngle
         let endAngle = min(settings.endTiltAngle, startAngle - 16.0)
         let preferredFullEffectAngle = 60.0
         let fullEffectAngle = min(startAngle - 8.0, max(endAngle + 8.0, preferredFullEffectAngle))
         
+        // Pre-arm the screenshot before any overlay is visible. This avoids one-frame
+        // flashes of an old texture when the user closes the lid quickly.
+        let preArmAngle = min(135.0, startAngle + 15.0)
+        if motionDirection == .closing,
+           angle <= preArmAngle,
+           angle > startAngle,
+           !preArmCapturedThisMotion,
+           settings.imageSourceMode == .liveCapture {
+            preArmCapturedThisMotion = true
+            captureScreenAsync()
+        }
+        if motionDirection == .opening && angle >= preArmAngle {
+            preArmCapturedThisMotion = false
+        }
+        
         let effectProgress: Double
         let closureProgress: Double
         
         if settings.isTestModeActive {
-            // Keep the preview slider useful even though the live hardware path is now
-            // split into spatial-effect and final-closure phases.
             effectProgress = min(1.0, max(0.0, turn / 0.58))
             closureProgress = min(1.0, max(0.0, (turn - 0.58) / 0.42))
         } else {
@@ -156,10 +169,6 @@ public final class OverlayWindowController: NSObject {
         let releaseAngle = min(135.0, startAngle + 8.0)
         let hasVisibleEffect = effectProgress > 0.0001 || closureProgress > 0.0001
         
-        // Latch the overlay once the fold begins. On the way back up, keep it alive
-        // slightly beyond the trigger angle so a hand hovering around ~90° cannot make
-        // the overlay flicker on/off. The last few degrees are a sharp 1:1 snapshot,
-        // making the handoff back to the real desktop visually invisible.
         if hasVisibleEffect {
             overlayLatched = true
         }
@@ -179,9 +188,9 @@ public final class OverlayWindowController: NSObject {
                     SkyLightOperator.shared.delegateWindow(win)
                 }
                 
-                // Pre-arm normally gives us the frame already. This is a fallback for a
-                // fast close, wake/unfold, or a user who disabled/re-enabled the effect.
-                if settings.imageSourceMode == .liveCapture {
+                // Fallback for an exceptionally fast close that jumped over the pre-arm zone.
+                if settings.imageSourceMode == .liveCapture && !preArmCapturedThisMotion {
+                    preArmCapturedThisMotion = true
                     captureScreenAsync()
                 }
             }
@@ -191,6 +200,9 @@ public final class OverlayWindowController: NSObject {
             mv.isPaused = true
             mv.currentTurn = 0.0
             mv.closureProgress = 0.0
+            if angle >= preArmAngle {
+                preArmCapturedThisMotion = false
+            }
         }
     }
     
@@ -211,6 +223,7 @@ public final class OverlayWindowController: NSObject {
     
     public func stopOverlay() {
         overlayLatched = false
+        preArmCapturedThisMotion = false
         lastRawAngle = nil
         motionDirection = .idle
         window?.alphaValue = 0.0
