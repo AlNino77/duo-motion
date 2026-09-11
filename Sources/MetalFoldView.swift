@@ -8,6 +8,8 @@ public struct Uniforms {
     public var cover: SIMD2<Float>
     public var aspect: Float
     public var turn: Float
+    public var closureProgress: Float
+    public var motionDirection: Float
     public var blurStrength: Float
     public var reflectionIntensity: Float
     
@@ -15,12 +17,16 @@ public struct Uniforms {
                 cover: SIMD2<Float> = .init(1, 1),
                 aspect: Float = 1.0,
                 turn: Float = 0.0,
+                closureProgress: Float = 0.0,
+                motionDirection: Float = 0.0,
                 blurStrength: Float = 1.0,
                 reflectionIntensity: Float = 1.0) {
         self.imageSize = imageSize
         self.cover = cover
         self.aspect = aspect
         self.turn = turn
+        self.closureProgress = closureProgress
+        self.motionDirection = motionDirection
         self.blurStrength = blurStrength
         self.reflectionIntensity = reflectionIntensity
     }
@@ -35,6 +41,8 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
     private var imageSize: SIMD2<Float> = .init(1920, 1080)
     
     public var currentTurn: Float = 0.0
+    public var closureProgress: Float = 0.0
+    public var motionDirection: Float = 0.0
     public var blurStrength: Float = 0.5
     public var reflectionIntensity: Float = 0.0
     
@@ -66,7 +74,6 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
         self.preferredFramesPerSecond = 120
         self.isPaused = false
         
-        // Sampler
         let samplerDesc = MTLSamplerDescriptor()
         samplerDesc.minFilter = .linear
         samplerDesc.magFilter = .linear
@@ -83,7 +90,6 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
         
         var library: MTLLibrary?
         
-        // Try to load compiled metallib first (check bundle for current class, then main)
         let bundle = Bundle(for: Self.self)
         if let libUrl = bundle.url(forResource: "default", withExtension: "metallib") ?? Bundle.main.url(forResource: "default", withExtension: "metallib") {
             library = try? dev.makeLibrary(URL: libUrl)
@@ -93,12 +99,10 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
             library = dev.makeDefaultLibrary()
         }
         
-        // If still nil, compile from source file directly
         if library == nil {
             let possiblePaths = [
                 Bundle.main.bundlePath + "/Contents/Resources/FoldShaders.metal",
-                Bundle.main.bundlePath + "/FoldShaders.metal",
-                "/Users/ca5/Desktop/iphone-duo-macos-animation/Sources/FoldShaders.metal"
+                Bundle.main.bundlePath + "/FoldShaders.metal"
             ]
             for p in possiblePaths {
                 if let source = try? String(contentsOfFile: p, encoding: .utf8) {
@@ -144,7 +148,6 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
         
         guard let texture = dev.makeTexture(descriptor: desc) else { return }
         
-        // Render CGImage into level 0
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         let bytesPerRow = width * 4
         let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
@@ -169,7 +172,6 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
             )
         }
         
-        // Generate mipmaps using blit command encoder
         if let cq = self.commandQueue,
            let cb = cq.makeCommandBuffer(),
            let blit = cb.makeBlitCommandEncoder() {
@@ -180,8 +182,6 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
         
         self.currentTexture = texture
     }
-    
-    // MARK: - MTKViewDelegate
     
     public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
     
@@ -210,6 +210,8 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
             cover: cover,
             aspect: aspect,
             turn: currentTurn,
+            closureProgress: closureProgress,
+            motionDirection: motionDirection,
             blurStrength: blurStrength,
             reflectionIntensity: reflectionIntensity
         )
