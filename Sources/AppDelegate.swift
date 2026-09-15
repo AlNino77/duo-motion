@@ -13,7 +13,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let sensor = LidSensor.shared
         sensor.onTurnUpdate = { turn, angle in
             OverlayWindowController.shared.update(turn: turn, angle: angle)
-            MenuBarController.shared.updateAngleDisplay(angle: angle, isConnected: AppSettings.shared.isSensorConnected)
         }
         sensor.start()
         
