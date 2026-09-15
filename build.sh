@@ -107,6 +107,8 @@ SWIFT_FRAMEWORKS=(
     -framework SwiftUI
     -framework Metal
     -framework MetalKit
+    -framework CoreMedia
+    -framework CoreVideo
     -framework ScreenCaptureKit
     -framework IOKit
     -framework QuartzCore

@@ -19,6 +19,7 @@ public final class OverlayWindowController: NSObject {
     private var motionDirection: MotionDirection = .idle
     private var lastPermissionProbe: TimeInterval = 0
     private var suppressForClamshell = false
+    private var streamLifecycleArmed = false
     private var displayReconfigurationObserver: NSObjectProtocol?
     private var stillSince: TimeInterval = 0
     private var stillLow: Double = 0
@@ -43,7 +44,7 @@ public final class OverlayWindowController: NSObject {
         // Keep the upstream pre-arm hook as a compatible fallback. This controller also
         // pre-arms directly from the raw angle so capture can happen before the visual trigger.
         LidSensor.shared.onPreArmCapture = { [weak self] in
-            self?.captureScreenAsync()
+            self?.primeCaptureStream()
         }
 
         refreshSuppression()
@@ -102,6 +103,8 @@ public final class OverlayWindowController: NSObject {
     private func handleDisplayReconfiguration() {
         refreshSuppression()
         ScreenCapture.shared.invalidateCaches()
+        StreamCapture.shared.restart()
+        streamLifecycleArmed = false
         if suppressForClamshell {
             stopOverlay()
             return
@@ -113,10 +116,20 @@ public final class OverlayWindowController: NSObject {
 
     /// A transparent top-level window still participates in WindowServer
     /// composition. Ordering it out is the only truthful idle state.
-    private func hideOverlay(resetProgress: Bool = true) {
+    private func hideOverlay(
+        resetProgress: Bool = true,
+        stopCaptureStream: Bool = true
+    ) {
+        if stopCaptureStream, streamLifecycleArmed {
+            StreamCapture.shared.noteHidden()
+            streamLifecycleArmed = false
+        }
         window?.alphaValue = 0.0
         window?.orderOut(nil)
         metalView?.isPaused = true
+        if stopCaptureStream {
+            AppSettings.shared.isScreenCaptureDormant = true
+        }
         if resetProgress {
             metalView?.currentTurn = 0.0
             metalView?.closureProgress = 0.0
@@ -154,8 +167,18 @@ public final class OverlayWindowController: NSObject {
             SkyLightOperator.shared.delegateWindow(win)
         }
         if AppSettings.shared.imageSourceMode == .liveCapture {
-            captureScreenAsync()
+            primeCaptureStream()
         }
+    }
+
+    private func primeCaptureStream() {
+        guard AppSettings.shared.imageSourceMode == .liveCapture,
+              capturePermissionIsGranted(),
+              !suppressForClamshell,
+              !streamLifecycleArmed else { return }
+        streamLifecycleArmed = true
+        AppSettings.shared.isScreenCaptureDormant = false
+        StreamCapture.shared.prime()
     }
     
     private func setupWindow() {
@@ -333,7 +356,7 @@ public final class OverlayWindowController: NSObject {
            !preArmCapturedThisMotion,
            settings.imageSourceMode == .liveCapture {
             preArmCapturedThisMotion = true
-            captureScreenAsync()
+            primeCaptureStream()
         }
         if motionDirection == .opening && angle >= preArmAngle {
             preArmCapturedThisMotion = false
@@ -378,8 +401,24 @@ public final class OverlayWindowController: NSObject {
         }
         
         if overlayLatched {
+            AppSettings.shared.isScreenCaptureDormant = false
             let wasHidden = win.alphaValue < 0.5
             if wasHidden {
+                var usedWarmFrame = false
+                if settings.imageSourceMode == .liveCapture {
+                    streamLifecycleArmed = true
+                    StreamCapture.shared.noteVisible()
+                    if let device = mv.device,
+                       let frame = StreamCapture.shared.takeLatestTexture(device: device) {
+                        mv.updateStreamTexture(
+                            frame.texture,
+                            width: frame.width,
+                            height: frame.height,
+                            keeper: frame.keeper
+                        )
+                        usedWarmFrame = true
+                    }
+                }
                 if let builtIn = DisplayTopology.builtInScreen(), win.frame != builtIn.frame {
                     win.setFrame(builtIn.frame, display: false)
                 }
@@ -390,14 +429,20 @@ public final class OverlayWindowController: NSObject {
                 }
                 
                 // Fallback for an exceptionally fast close that jumped over the pre-arm zone.
-                if settings.imageSourceMode == .liveCapture && !preArmCapturedThisMotion {
+                if settings.imageSourceMode == .liveCapture && !usedWarmFrame {
                     preArmCapturedThisMotion = true
+                    ScreenCapture.shared.invalidateCaches()
                     captureScreenAsync()
                 }
             }
             mv.isPaused = false
         } else {
-            hideOverlay()
+            let keepStreamWarm = !win.isVisible
+                && settings.imageSourceMode == .liveCapture
+                && preArmCapturedThisMotion
+                && angle > startAngle
+                && angle <= preArmAngle
+            hideOverlay(stopCaptureStream: !keepStreamWarm)
             if angle >= preArmAngle {
                 preArmCapturedThisMotion = false
             }

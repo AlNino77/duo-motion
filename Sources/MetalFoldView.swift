@@ -228,6 +228,72 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
             cb.commit()
         }
     }
+
+    /// Copies an IOSurface-backed capture directly into the private fold
+    /// texture. The source mapping stays retained until the GPU is finished.
+    public func updateStreamTexture(
+        _ source: MTLTexture,
+        width: Int,
+        height: Int,
+        keeper: AnyObject
+    ) {
+        guard let dev = self.device,
+              let cq = self.commandQueue else { return }
+        let copyWidth = min(width, source.width)
+        let copyHeight = min(height, source.height)
+        guard copyWidth > 0, copyHeight > 0 else { return }
+
+        textureStateLock.lock()
+        textureGeneration &+= 1
+        let generation = textureGeneration
+        textureStateLock.unlock()
+
+        textureUploadQueue.async { [weak self, keeper] in
+            guard let self else { return }
+            let fullMipCount = max(
+                1,
+                Int(floor(log2(Double(max(copyWidth, copyHeight))))) + 1
+            )
+            let levels = min(6, fullMipCount)
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: copyWidth,
+                height: copyHeight,
+                mipmapped: true
+            )
+            descriptor.mipmapLevelCount = levels
+            descriptor.usage = [.shaderRead]
+            descriptor.storageMode = .private
+
+            guard let texture = dev.makeTexture(descriptor: descriptor),
+                  let commandBuffer = cq.makeCommandBuffer(),
+                  let blit = commandBuffer.makeBlitCommandEncoder() else { return }
+            blit.copy(
+                from: source,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                sourceSize: MTLSize(width: copyWidth, height: copyHeight, depth: 1),
+                to: texture,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
+            blit.generateMipmaps(for: texture)
+            blit.endEncoding()
+            commandBuffer.addCompletedHandler { [weak self, keeper] buffer in
+                _ = keeper
+                guard buffer.status == .completed, let self else { return }
+                self.textureStateLock.lock()
+                if self.textureGeneration == generation {
+                    self.currentTexture = texture
+                    self.imageSize = SIMD2<Float>(Float(copyWidth), Float(copyHeight))
+                }
+                self.textureStateLock.unlock()
+            }
+            commandBuffer.commit()
+        }
+    }
     
     public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
     
