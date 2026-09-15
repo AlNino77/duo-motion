@@ -17,6 +17,7 @@ public final class OverlayWindowController: NSObject {
     private var preArmCapturedThisMotion = false
     private var lastRawAngle: Double?
     private var motionDirection: MotionDirection = .idle
+    private var lastPermissionProbe: TimeInterval = 0
     
     public override init() {
         super.init()
@@ -28,6 +29,19 @@ public final class OverlayWindowController: NSObject {
         LidSensor.shared.onPreArmCapture = { [weak self] in
             self?.captureScreenAsync()
         }
+    }
+
+    /// Permission can change in System Settings while DuoMo remains active.
+    private func capturePermissionIsGranted() -> Bool {
+        let settings = AppSettings.shared
+        if settings.hasScreenRecordingPermission { return true }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastPermissionProbe >= 1.0 else { return false }
+        lastPermissionProbe = now
+        let granted = ScreenCapture.shared.hasPermission()
+        if granted { settings.hasScreenRecordingPermission = true }
+        return granted
     }
     
     private func setupSleepObservers() {
@@ -134,6 +148,10 @@ public final class OverlayWindowController: NSObject {
         guard let win = self.window, let mv = self.metalView else { return }
         
         let settings = AppSettings.shared
+        guard capturePermissionIsGranted() else {
+            stopOverlay()
+            return
+        }
         updateMotionDirection(with: angle)
         
         let startAngle = settings.startTiltAngle

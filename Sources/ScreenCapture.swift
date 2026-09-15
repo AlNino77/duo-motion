@@ -81,11 +81,8 @@ public final class ScreenCapture {
         
         switch settings.imageSourceMode {
         case .liveCapture:
-            if await verifyPermissionAsync(), let img = await captureLiveScreen() {
-                return img
-            }
-            // Fallback if permission not granted or capture failed
-            return fetchWallpaperImage() ?? fetchBundledDefaultImage()
+            guard await verifyPermissionAsync() else { return nil }
+            return await captureLiveScreen()
             
         case .desktopWallpaper:
             return fetchWallpaperImage() ?? fetchBundledDefaultImage()
