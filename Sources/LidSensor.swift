@@ -14,9 +14,17 @@ public final class LidSensor {
     private var hidManager: IOHIDManager?
     private var hidDevice: IOHIDDevice?
     private var isDeviceOpen = false
+    private let hidQueue = DispatchQueue(label: "com.lqsky7.duomo.hid", qos: .userInitiated)
+    private let hidStateLock = NSLock()
+    private var hidTimer: DispatchSourceTimer?
+    private var lastHIDReopenAttempt: CFTimeInterval = 0
+    private var readFailureCount = 0
+    private var latestRawAngle: Double = 120.0
+    private var latestSampleTime: CFTimeInterval = 0
+    private var latestReadSucceeded = false
     private var timer: Timer?
+    private var workspaceObserverTokens: [NSObjectProtocol] = []
     
-    private var hidReport = [UInt8](repeating: 0, count: 8)
     private static let noOptions = IOOptionBits(kIOHIDOptionsTypeNone)
     
     // Physics and motion tracking
@@ -25,6 +33,11 @@ public final class LidSensor {
     public private(set) var targetTurn: Double = 0.0
     public private(set) var currentRawAngle: Double = 120.0
     private var previousRawAngle: Double = 120.0
+    private var previousSampleTime: CFTimeInterval = 0
+    private var smoothedAngularVelocity: Double = 0
+    private var predictorAngle: Double = 120.0
+    private var predictorVelocity: Double = 0
+    private var predictorSampleTime: CFTimeInterval = 0
     private var isActivelyClosing: Bool = false
     private var hasPreArmedInThisMotion: Bool = false
     private var lastPreArmTime: CFTimeInterval = 0
@@ -48,35 +61,33 @@ public final class LidSensor {
     
     deinit {
         stop()
+        let center = NSWorkspace.shared.notificationCenter
+        workspaceObserverTokens.forEach(center.removeObserver)
     }
     
     private func setupWakeAndSleepObservers() {
         let ws = NSWorkspace.shared.notificationCenter
-        ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+        workspaceObserverTokens.append(ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.handleWake()
-        }
-        ws.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+        })
+        workspaceObserverTokens.append(ws.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.handleWake()
-        }
-        ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+        })
+        workspaceObserverTokens.append(ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             self?.handleWillSleep()
-        }
-        ws.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+        })
+        workspaceObserverTokens.append(ws.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
             self?.handleWillSleep()
-        }
+        })
     }
     
     public func handleWake() {
         if AppSettings.shared.isHardwareSensor {
-            if isDeviceOpen, let device = hidDevice {
-                IOHIDDeviceClose(device, Self.noOptions)
-                isDeviceOpen = false
-            }
-            setupManager()
-            if let device = hidDevice {
-                if IOHIDDeviceOpen(device, Self.noOptions) == kIOReturnSuccess {
-                    isDeviceOpen = true
-                }
+            resetPredictor(to: currentRawAngle)
+            hidQueue.async { [weak self] in
+                guard let self else { return }
+                self.stopHIDPollingOnQueue(closeDevice: true)
+                self.startHIDPollingOnQueue()
             }
         } else {
             // Clamshell mode: on wake / opening from sleep, animate unfold
@@ -90,14 +101,46 @@ public final class LidSensor {
             animateFold()
         }
     }
+
+    /// Check for the dedicated lid-angle sensor without opening HID devices.
+    /// Nil means the registry query itself was inconclusive.
+    private static func lidAngleSensorPresenceInIORegistry() -> Bool? {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(
+            kIOMainPortDefault,
+            IOServiceMatching("IOHIDDevice"),
+            &iterator
+        ) == KERN_SUCCESS else { return nil }
+        defer { IOObjectRelease(iterator) }
+
+        func property(_ service: io_service_t, _ key: String) -> CFTypeRef? {
+            IORegistryEntryCreateCFProperty(service, key as CFString, kCFAllocatorDefault, 0)?
+                .takeRetainedValue()
+        }
+
+        var sawHIDDevice = false
+        while case let service = IOIteratorNext(iterator), service != 0 {
+            sawHIDDevice = true
+            defer { IOObjectRelease(service) }
+
+            let product = (property(service, kIOHIDProductKey) as? String) ?? ""
+            if product.lowercased() == "las" { return true }
+
+            let pid = (property(service, kIOHIDProductIDKey) as? NSNumber)?.intValue ?? 0
+            let page = (property(service, kIOHIDPrimaryUsagePageKey) as? NSNumber)?.intValue ?? 0
+            let usage = (property(service, kIOHIDPrimaryUsageKey) as? NSNumber)?.intValue ?? 0
+            if pid == 0x8104, page == 0x0020, usage == 0x008A { return true }
+        }
+        return sawHIDDevice ? false : nil
+    }
     
     private func setupManager() {
-        let manager = IOHIDManagerCreate(kCFAllocatorDefault, Self.noOptions)
-        guard IOHIDManagerOpen(manager, Self.noOptions) == kIOReturnSuccess else {
-            activateClamshellMode(reason: "IOHIDManager unavailable")
+        if Self.lidAngleSensorPresenceInIORegistry() == false {
+            activateClamshellMode(reason: "No continuous lid angle sensor found")
             return
         }
-        self.hidManager = manager
+
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, Self.noOptions)
         
         // Multi-Strategy Hardware Sensor Probing:
         // STRICTLY match only sensor hardware (UsagePage 0x20, PID 0x8104, "las").
@@ -114,12 +157,14 @@ public final class LidSensor {
             [
                 kIOHIDDeviceUsagePageKey as String: 0x0020,
                 kIOHIDDeviceUsageKey as String: 0x008A
-            ],
-            [
-                kIOHIDProductKey as String: "las"
             ]
         ]
         IOHIDManagerSetDeviceMatchingMultiple(manager, matchingCriteria as CFArray)
+        guard IOHIDManagerOpen(manager, Self.noOptions) == kIOReturnSuccess else {
+            activateClamshellMode(reason: "Lid sensor HID access unavailable")
+            return
+        }
+        self.hidManager = manager
         
         guard let devices = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else {
             activateClamshellMode(reason: "No sensor HID devices found")
@@ -143,8 +188,7 @@ public final class LidSensor {
             let isCandidate = prod.lowercased() == "las" ||
                               prod.lowercased().contains("lid") ||
                               prod.lowercased().contains("angle") ||
-                              (page == 32 && usage == 138) ||
-                              pid == 0x8104
+                              (page == 32 && usage == 138)
             
             if isCandidate {
                 if IOHIDDeviceOpen(dev, Self.noOptions) == kIOReturnSuccess {
@@ -226,12 +270,146 @@ public final class LidSensor {
         }
     }
     
+    // The feature-report call can occasionally block while the Mac wakes.
+    // Keep it away from the main run loop and publish only a small snapshot.
+    private func startHIDPollingOnQueue() {
+        guard hidTimer == nil else { return }
+        _ = openHIDDeviceIfNeeded(force: true)
+
+        let source = DispatchSource.makeTimerSource(queue: hidQueue)
+        source.schedule(
+            deadline: .now(),
+            repeating: .nanoseconds(16_666_667),
+            leeway: .milliseconds(2)
+        )
+        source.setEventHandler { [weak self] in
+            self?.pollHIDOnce()
+        }
+        hidTimer = source
+        source.resume()
+    }
+
+    private func stopHIDPollingOnQueue(closeDevice: Bool) {
+        hidTimer?.setEventHandler {}
+        hidTimer?.cancel()
+        hidTimer = nil
+        if closeDevice, isDeviceOpen, let device = hidDevice {
+            IOHIDDeviceClose(device, Self.noOptions)
+            isDeviceOpen = false
+        }
+        publishHIDReadFailure()
+    }
+
+    private func openHIDDeviceIfNeeded(force: Bool = false) -> Bool {
+        if isDeviceOpen { return true }
+        guard let device = hidDevice else { return false }
+
+        let now = CACurrentMediaTime()
+        if !force, now - lastHIDReopenAttempt < 1.0 { return false }
+        lastHIDReopenAttempt = now
+        if IOHIDDeviceOpen(device, Self.noOptions) == kIOReturnSuccess {
+            isDeviceOpen = true
+            readFailureCount = 0
+            return true
+        }
+        return false
+    }
+
+    private func pollHIDOnce() {
+        guard openHIDDeviceIfNeeded(), let device = hidDevice else {
+            publishHIDReadFailure()
+            return
+        }
+
+        var report = [UInt8](repeating: 0, count: 8)
+        var length = CFIndex(report.count)
+        let result = IOHIDDeviceGetReport(
+            device,
+            kIOHIDReportTypeFeature,
+            1,
+            &report,
+            &length
+        )
+
+        guard result == kIOReturnSuccess, length >= 3 else {
+            readFailureCount += 1
+            publishHIDReadFailure()
+            if readFailureCount >= 3 {
+                IOHIDDeviceClose(device, Self.noOptions)
+                isDeviceOpen = false
+            }
+            return
+        }
+
+        readFailureCount = 0
+        let rawValue = UInt16(report[2]) << 8 | UInt16(report[1])
+        hidStateLock.lock()
+        latestRawAngle = Double(rawValue)
+        latestSampleTime = CACurrentMediaTime()
+        latestReadSucceeded = true
+        hidStateLock.unlock()
+    }
+
+    private func publishHIDReadFailure() {
+        hidStateLock.lock()
+        latestReadSucceeded = false
+        hidStateLock.unlock()
+    }
+
+    private func latestHIDSample() -> (angle: Double, time: CFTimeInterval, succeeded: Bool) {
+        hidStateLock.lock()
+        defer { hidStateLock.unlock() }
+        return (latestRawAngle, latestSampleTime, latestReadSucceeded)
+    }
+
+    private func resetPredictor(to angle: Double) {
+        predictorAngle = angle
+        predictorVelocity = 0
+        predictorSampleTime = 0
+        previousRawAngle = angle
+        previousSampleTime = 0
+        smoothedAngularVelocity = 0
+    }
+
+    private func updatePredictor(measured angle: Double, sampleTime: CFTimeInterval) {
+        let dt = sampleTime - predictorSampleTime
+        guard predictorSampleTime > 0, dt > 0, dt <= 0.25 else {
+            predictorAngle = angle
+            predictorVelocity = 0
+            predictorSampleTime = sampleTime
+            return
+        }
+
+        let measuredVelocity = (angle - previousRawAngle) / dt
+        guard abs(measuredVelocity) <= 1_200 else {
+            predictorAngle = angle
+            predictorVelocity = 0
+            predictorSampleTime = sampleTime
+            return
+        }
+
+        let projectedAngle = predictorAngle + predictorVelocity * dt
+        let correction = angle - projectedAngle
+        predictorAngle = projectedAngle + correction * 0.35
+        predictorVelocity += correction / dt * 0.08
+        predictorVelocity = min(720, max(-720, predictorVelocity))
+        predictorSampleTime = sampleTime
+    }
+
+    private func predictedAngle(measured angle: Double, sampleAge: CFTimeInterval) -> Double {
+        guard isActivelyClosing, smoothedAngularVelocity < -3 else { return angle }
+        let horizon = min(0.08, max(0, sampleAge) + 0.045)
+        let estimate = predictorAngle + predictorVelocity * horizon
+        let lead = min(8.0, max(-8.0, estimate - angle))
+        return min(180, max(0, angle + lead))
+    }
+
     public func start() {
         guard timer == nil else { return }
         
-        if let device = hidDevice, !isDeviceOpen {
-            if IOHIDDeviceOpen(device, Self.noOptions) == kIOReturnSuccess {
-                isDeviceOpen = true
+        if AppSettings.shared.isHardwareSensor {
+            hidQueue.async { [weak self] in
+                self?.startHIDPollingOnQueue()
             }
         }
         
@@ -244,9 +422,8 @@ public final class LidSensor {
     public func stop() {
         timer?.invalidate()
         timer = nil
-        if isDeviceOpen, let device = hidDevice {
-            IOHIDDeviceClose(device, Self.noOptions)
-            isDeviceOpen = false
+        hidQueue.async { [weak self] in
+            self?.stopHIDPollingOnQueue(closeDevice: true)
         }
     }
     
@@ -254,24 +431,21 @@ public final class LidSensor {
         let settings = AppSettings.shared
         
         if settings.isHardwareSensor {
-            if isDeviceOpen, let device = hidDevice {
-                var length = CFIndex(hidReport.count)
-                let result = IOHIDDeviceGetReport(
-                    device,
-                    kIOHIDReportTypeFeature,
-                    1,
-                    &hidReport,
-                    &length
-                )
-                if result == kIOReturnSuccess, length >= 3 {
-                    let rawValue = UInt16(hidReport[2]) << 8 | UInt16(hidReport[1])
-                    let angle = Double(rawValue)
-                    
-                    // Track direction of movement and velocity
-                    let delta = angle - previousRawAngle
-                    let isMovingDownward = delta < -0.4
-                    let isMovingUpward = delta > 0.6
-                    
+            let nowTime = CACurrentMediaTime()
+            let sample = latestHIDSample()
+            let sampleAge = nowTime - sample.time
+
+            if sample.succeeded, sample.time > previousSampleTime, sampleAge <= 0.25 {
+                let angle = sample.angle
+                let sampleInterval = sample.time - previousSampleTime
+
+                if previousSampleTime > 0, sampleInterval > 0 {
+                    let instantVelocity = (angle - previousRawAngle) / sampleInterval
+                    smoothedAngularVelocity = smoothedAngularVelocity * 0.65 + instantVelocity * 0.35
+                    updatePredictor(measured: angle, sampleTime: sample.time)
+
+                    let isMovingDownward = smoothedAngularVelocity < -18
+                    let isMovingUpward = smoothedAngularVelocity > 24
                     if isMovingDownward {
                         isActivelyClosing = true
                         stationaryFrames = 0
@@ -285,56 +459,58 @@ public final class LidSensor {
                             isActivelyClosing = false
                         }
                     }
-                    
-                    // If lid is safely open, reset pre-arm latch and mark capture engine dormant
-                    if angle >= settings.startTiltAngle || (!isActivelyClosing && angle >= settings.startTiltAngle - 10.0) {
-                        hasPreArmedInThisMotion = false
-                        if !settings.isScreenCaptureDormant {
-                            settings.isScreenCaptureDormant = true
-                        }
-                    }
-                    
-                    // Hardware Pre-Arming Capture Zone:
-                    let nowTime = CACurrentMediaTime()
-                    let preArmThreshold = min(135.0, settings.startTiltAngle + 15.0)
-                    if angle <= preArmThreshold && angle < settings.startTiltAngle {
-                        if !hasPreArmedInThisMotion && (nowTime - lastPreArmTime > 2.0) {
-                            hasPreArmedInThisMotion = true
-                            lastPreArmTime = nowTime
-                            settings.isScreenCaptureDormant = false
-                            onPreArmCapture?()
-                        }
-                    }
-                    
-                    previousRawAngle = angle
-                    currentRawAngle = angle
-                    // The renderer still receives all 60 Hz sensor samples below.
-                    // Published UI state only needs human-readable cadence; pushing
-                    // it every tick needlessly invalidates the entire SwiftUI panel.
-                    if nowTime - lastUIStatePublishTime >= 1.0 / 15.0 {
-                        lastUIStatePublishTime = nowTime
-                        settings.currentLidAngle = angle
-                    }
-                    if settings.isClosing != isActivelyClosing {
-                        settings.isClosing = isActivelyClosing
-                    }
-                    if !settings.isSensorConnected {
-                        settings.isSensorConnected = true
-                    }
                 } else {
-                    // Device connection may have dropped or suspended during deep sleep
-                    isDeviceOpen = false
-                    if IOHIDDeviceOpen(device, Self.noOptions) == kIOReturnSuccess {
-                        isDeviceOpen = true
+                    resetPredictor(to: angle)
+                    predictorSampleTime = sample.time
+                }
+
+                // If lid is safely open, reset pre-arm latch and mark capture engine dormant
+                if angle >= settings.startTiltAngle || (!isActivelyClosing && angle >= settings.startTiltAngle - 10.0) {
+                    hasPreArmedInThisMotion = false
+                    if !settings.isScreenCaptureDormant {
+                        settings.isScreenCaptureDormant = true
                     }
                 }
+
+                // Wake capture shortly before the configured fold range.
+                let preArmThreshold = min(135.0, settings.startTiltAngle + 15.0)
+                if angle <= preArmThreshold && angle < settings.startTiltAngle {
+                    if !hasPreArmedInThisMotion && nowTime - lastPreArmTime > 2.0 {
+                        hasPreArmedInThisMotion = true
+                        lastPreArmTime = nowTime
+                        settings.isScreenCaptureDormant = false
+                        onPreArmCapture?()
+                    }
+                }
+
+                previousRawAngle = angle
+                previousSampleTime = sample.time
+                currentRawAngle = angle
+                if nowTime - lastUIStatePublishTime >= 1.0 / 15.0 {
+                    lastUIStatePublishTime = nowTime
+                    settings.currentLidAngle = angle
+                }
+                if settings.isClosing != isActivelyClosing {
+                    settings.isClosing = isActivelyClosing
+                }
+                if !settings.isSensorConnected {
+                    settings.isSensorConnected = true
+                }
+            } else if sample.time > 0, sampleAge > 0.5, settings.isSensorConnected {
+                settings.isSensorConnected = false
+                settings.sensorStatusMessage = "Waiting for the lid angle sensor to resume."
             }
-            
-            // Compute target turn: continuously mirrors physical angle across full range
-            targetTurn = settings.normalizedTurn(for: currentRawAngle)
-            
+
+            // The tile keeps the measured angle. Only the animation receives this
+            // bounded prediction while the lid is actively closing.
+            let renderAngle = predictedAngle(
+                measured: currentRawAngle,
+                sampleAge: sample.time > 0 ? sampleAge : 0
+            )
+            targetTurn = settings.normalizedTurn(for: renderAngle)
+
             // Follow easing physics
-            let now = CACurrentMediaTime()
+            let now = nowTime
             let dt: Double
             if let last = lastTime {
                 dt = min(now - last, 0.1)

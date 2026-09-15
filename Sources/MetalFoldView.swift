@@ -41,6 +41,7 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
     
     private var currentTexture: MTLTexture?
     private var imageSize: SIMD2<Float> = .init(1920, 1080)
+    private var textureGeneration: UInt64 = 0
     
     public var currentTurn: Float = 0.0
     public var closureProgress: Float = 0.0
@@ -140,27 +141,46 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
               let dev = self.device,
               let cq = self.commandQueue else { return }
 
+        textureStateLock.lock()
+        textureGeneration &+= 1
+        let generation = textureGeneration
+        textureStateLock.unlock()
+
         // A Retina screenshot is tens of megabytes. Convert and upload it away
         // from the main run loop so lid polling and window presentation do not
         // stall exactly as the fold begins.
         textureUploadQueue.async { [weak self] in
             guard let self else { return }
 
-            let levels = max(1, Int(floor(log2(Double(max(width, height))))) + 1)
+            // The shader samples LOD 0...5. Building the rest of a full Retina
+            // mip chain burns memory and bandwidth without changing a pixel.
+            let fullMipCount = max(1, Int(floor(log2(Double(max(width, height))))) + 1)
+            let levels = min(6, fullMipCount)
             let desc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .rgba8Unorm,
+                pixelFormat: .bgra8Unorm,
                 width: width,
                 height: height,
                 mipmapped: true
             )
             desc.mipmapLevelCount = levels
-            desc.usage = [.shaderRead, .renderTarget]
+            desc.usage = [.shaderRead]
+            desc.storageMode = .private
 
-            guard let texture = dev.makeTexture(descriptor: desc) else { return }
+            let stagingDesc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            stagingDesc.usage = [.shaderRead]
+            stagingDesc.storageMode = .shared
+
+            guard let texture = dev.makeTexture(descriptor: desc),
+                  let staging = dev.makeTexture(descriptor: stagingDesc) else { return }
 
             let colorSpace = CGColorSpaceCreateDeviceRGB()
             let bytesPerRow = width * 4
-            let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+            let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
 
             guard let context = CGContext(
                 data: nil,
@@ -174,7 +194,7 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
 
             context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
             guard let data = context.data else { return }
-            texture.replace(
+            staging.replace(
                 region: MTLRegionMake2D(0, 0, width, height),
                 mipmapLevel: 0,
                 withBytes: data,
@@ -183,16 +203,95 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
 
             guard let cb = cq.makeCommandBuffer(),
                   let blit = cb.makeBlitCommandEncoder() else { return }
+            blit.copy(
+                from: staging,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                sourceSize: MTLSize(width: width, height: height, depth: 1),
+                to: texture,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
             blit.generateMipmaps(for: texture)
             blit.endEncoding()
+            cb.addCompletedHandler { [weak self] buffer in
+                guard buffer.status == .completed, let self else { return }
+                self.textureStateLock.lock()
+                if self.textureGeneration == generation {
+                    self.currentTexture = texture
+                    self.imageSize = SIMD2<Float>(Float(width), Float(height))
+                }
+                self.textureStateLock.unlock()
+            }
             cb.commit()
-            cb.waitUntilCompleted()
+        }
+    }
 
-            guard cb.status == .completed else { return }
-            self.textureStateLock.lock()
-            self.currentTexture = texture
-            self.imageSize = SIMD2<Float>(Float(width), Float(height))
-            self.textureStateLock.unlock()
+    /// Copies an IOSurface-backed capture directly into the private fold
+    /// texture. The source mapping stays retained until the GPU is finished.
+    public func updateStreamTexture(
+        _ source: MTLTexture,
+        width: Int,
+        height: Int,
+        keeper: AnyObject
+    ) {
+        guard let dev = self.device,
+              let cq = self.commandQueue else { return }
+        let copyWidth = min(width, source.width)
+        let copyHeight = min(height, source.height)
+        guard copyWidth > 0, copyHeight > 0 else { return }
+
+        textureStateLock.lock()
+        textureGeneration &+= 1
+        let generation = textureGeneration
+        textureStateLock.unlock()
+
+        textureUploadQueue.async { [weak self, keeper] in
+            guard let self else { return }
+            let fullMipCount = max(
+                1,
+                Int(floor(log2(Double(max(copyWidth, copyHeight))))) + 1
+            )
+            let levels = min(6, fullMipCount)
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: copyWidth,
+                height: copyHeight,
+                mipmapped: true
+            )
+            descriptor.mipmapLevelCount = levels
+            descriptor.usage = [.shaderRead]
+            descriptor.storageMode = .private
+
+            guard let texture = dev.makeTexture(descriptor: descriptor),
+                  let commandBuffer = cq.makeCommandBuffer(),
+                  let blit = commandBuffer.makeBlitCommandEncoder() else { return }
+            blit.copy(
+                from: source,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                sourceSize: MTLSize(width: copyWidth, height: copyHeight, depth: 1),
+                to: texture,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
+            blit.generateMipmaps(for: texture)
+            blit.endEncoding()
+            commandBuffer.addCompletedHandler { [weak self, keeper] buffer in
+                _ = keeper
+                guard buffer.status == .completed, let self else { return }
+                self.textureStateLock.lock()
+                if self.textureGeneration == generation {
+                    self.currentTexture = texture
+                    self.imageSize = SIMD2<Float>(Float(copyWidth), Float(copyHeight))
+                }
+                self.textureStateLock.unlock()
+            }
+            commandBuffer.commit()
         }
     }
     

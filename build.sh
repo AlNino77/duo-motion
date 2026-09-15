@@ -107,6 +107,8 @@ SWIFT_FRAMEWORKS=(
     -framework SwiftUI
     -framework Metal
     -framework MetalKit
+    -framework CoreMedia
+    -framework CoreVideo
     -framework ScreenCaptureKit
     -framework IOKit
     -framework QuartzCore
@@ -132,7 +134,7 @@ cp "$INFO_PLIST" "$CONTENTS_DIR/Info.plist"
 
 if [[ ! -f "$DIR/Resources/AppIcon.icns" && -f "$DIR/Resources/AppIcon.png" ]]; then
     echo "▶ Generating AppIcon.icns..."
-    ICONSET="/tmp/DuoMo-AppIcon.iconset"
+    ICONSET="$BUILD_DIR/AppIcon.iconset"
     rm -rf "$ICONSET"
     mkdir -p "$ICONSET"
     sips -z 16 16     "$DIR/Resources/AppIcon.png" --out "$ICONSET/icon_16x16.png" >/dev/null 2>&1
@@ -174,7 +176,7 @@ echo "▶ Using signing identity: $SIGNING_IDENTITY"
 codesign --force --deep --sign "$SIGNING_IDENTITY" "$APP_BUNDLE"
 
 echo "▶ Creating disk image..."
-DMG_STAGING="/tmp/DuoMo-dmg-staging"
+DMG_STAGING="$BUILD_DIR/dmg-staging"
 rm -rf "$DMG_STAGING" "$DMG_OUTPUT"
 mkdir -p "$DMG_STAGING"
 cp -R "$APP_BUNDLE" "$DMG_STAGING/$APP_NAME.app"

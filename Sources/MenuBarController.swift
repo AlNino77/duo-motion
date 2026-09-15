@@ -7,10 +7,6 @@ public final class MenuBarController: NSObject, NSWindowDelegate {
     
     private var statusItem: NSStatusItem?
     private var controlPanelWindow: NSWindow?
-    private var angleMenuItem: NSMenuItem?
-    private var lastRenderedConnectedState: Bool?
-    private var lastRenderedHardwareState: Bool?
-    private var lastRenderedClosingState: Bool?
     
     public override init() {
         super.init()
@@ -30,11 +26,6 @@ public final class MenuBarController: NSObject, NSWindowDelegate {
         let header = NSMenuItem(title: "DuoMo", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
-        
-        let angleItem = NSMenuItem(title: "Sensor: Connecting...", action: nil, keyEquivalent: "")
-        angleItem.isEnabled = false
-        self.angleMenuItem = angleItem
-        menu.addItem(angleItem)
         
         menu.addItem(NSMenuItem.separator())
         
@@ -56,34 +47,6 @@ public final class MenuBarController: NSObject, NSWindowDelegate {
         self.statusItem = item
         
         refreshMenuBarTitle()
-    }
-    
-    public func updateAngleDisplay(angle _: Double, isConnected: Bool) {
-        let isHardwareSensor = AppSettings.shared.isHardwareSensor
-        let isClosing = AppSettings.shared.isClosing
-        guard isConnected != lastRenderedConnectedState ||
-                isHardwareSensor != lastRenderedHardwareState ||
-                isClosing != lastRenderedClosingState else {
-            return
-        }
-
-        lastRenderedConnectedState = isConnected
-        lastRenderedHardwareState = isHardwareSensor
-        lastRenderedClosingState = isClosing
-
-        statusItem?.button?.title = ""
-        
-        if let angleItem = self.angleMenuItem {
-            if isConnected {
-                if isHardwareSensor {
-                    angleItem.title = isClosing ? "Sensor: Folding" : "Sensor: Ready"
-                } else {
-                    angleItem.title = "Mode: Clamshell Auto-Animation"
-                }
-            } else {
-                angleItem.title = "Lid Sensor: Disconnected"
-            }
-        }
     }
     
     public func refreshMenuBarTitle() {
