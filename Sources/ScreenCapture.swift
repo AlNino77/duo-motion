@@ -109,13 +109,17 @@ public final class ScreenCapture {
             } else {
                 content = try await SCShareableContent.current
             }
-            guard let display = content.displays.first else { return nil }
+            guard let display = content.displays.first(where: {
+                CGDisplayIsBuiltin($0.displayID) != 0
+            }) ?? content.displays.first else { return nil }
             
             // Exclude our own app's windows
             let currentAppPID = NSRunningApplication.current.processIdentifier
             let excludedWindows = content.windows.filter { $0.owningApplication?.processID == currentAppPID }
             
-            let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+            let scale = await MainActor.run {
+                DisplayTopology.builtInBackingScale()
+            }
             let filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
             let config = SCStreamConfiguration()
             config.width = Int(Double(display.width) * scale)
@@ -133,7 +137,7 @@ public final class ScreenCapture {
     
     /// Get user's current desktop wallpaper
     public func fetchWallpaperImage() -> CGImage? {
-        guard let screen = NSScreen.main,
+        guard let screen = DisplayTopology.builtInScreen() ?? NSScreen.main,
               let url = NSWorkspace.shared.desktopImageURL(for: screen),
               let image = NSImage(contentsOf: url) else {
             return nil

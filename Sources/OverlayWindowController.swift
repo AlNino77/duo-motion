@@ -18,6 +18,8 @@ public final class OverlayWindowController: NSObject {
     private var lastRawAngle: Double?
     private var motionDirection: MotionDirection = .idle
     private var lastPermissionProbe: TimeInterval = 0
+    private var suppressForClamshell = false
+    private var displayReconfigurationObserver: NSObjectProtocol?
     
     public override init() {
         super.init()
@@ -28,6 +30,21 @@ public final class OverlayWindowController: NSObject {
         // pre-arms directly from the raw angle so capture can happen before the visual trigger.
         LidSensor.shared.onPreArmCapture = { [weak self] in
             self?.captureScreenAsync()
+        }
+
+        refreshSuppression()
+        displayReconfigurationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleDisplayReconfiguration()
+        }
+    }
+
+    deinit {
+        if let displayReconfigurationObserver {
+            NotificationCenter.default.removeObserver(displayReconfigurationObserver)
         }
     }
 
@@ -57,6 +74,25 @@ public final class OverlayWindowController: NSObject {
         }
         ws.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.handleWake()
+        }
+    }
+
+    private static func foldScreen() -> NSScreen? {
+        DisplayTopology.builtInScreen() ?? NSScreen.main ?? NSScreen.screens.first
+    }
+
+    private func refreshSuppression() {
+        suppressForClamshell = DisplayTopology.isClamshellDesktop
+    }
+
+    private func handleDisplayReconfiguration() {
+        refreshSuppression()
+        if suppressForClamshell {
+            stopOverlay()
+            return
+        }
+        if let screen = DisplayTopology.builtInScreen() {
+            window?.setFrame(screen.frame, display: false)
         }
     }
 
@@ -90,6 +126,12 @@ public final class OverlayWindowController: NSObject {
         preArmCapturedThisMotion = false
         lastRawAngle = nil
         motionDirection = .idle
+        refreshSuppression()
+        guard !suppressForClamshell else {
+            hideOverlay()
+            AppSettings.shared.isScreenCaptureDormant = true
+            return
+        }
         
         if let win = self.window, AppSettings.shared.enableLockScreenPriority {
             SkyLightOperator.shared.delegateWindow(win)
@@ -100,7 +142,7 @@ public final class OverlayWindowController: NSObject {
     }
     
     private func setupWindow() {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        guard let screen = Self.foldScreen() else { return }
         
         let win = NSWindow(
             contentRect: screen.frame,
@@ -149,6 +191,13 @@ public final class OverlayWindowController: NSObject {
         
         let settings = AppSettings.shared
         guard capturePermissionIsGranted() else {
+            stopOverlay()
+            return
+        }
+        if !overlayLatched && turn > 0.0001 {
+            refreshSuppression()
+        }
+        guard !suppressForClamshell else {
             stopOverlay()
             return
         }
@@ -212,6 +261,9 @@ public final class OverlayWindowController: NSObject {
         if overlayLatched {
             let wasHidden = win.alphaValue < 0.5
             if wasHidden {
+                if let builtIn = DisplayTopology.builtInScreen(), win.frame != builtIn.frame {
+                    win.setFrame(builtIn.frame, display: false)
+                }
                 win.alphaValue = 1.0
                 win.orderFrontRegardless()
                 if settings.enableLockScreenPriority {
@@ -266,6 +318,11 @@ public final class OverlayWindowController: NSObject {
     }
     
     public func captureScreenAsync() {
+        refreshSuppression()
+        guard !suppressForClamshell else {
+            AppSettings.shared.isScreenCaptureDormant = true
+            return
+        }
         guard !isCapturing else { return }
         isCapturing = true
         AppSettings.shared.isScreenCaptureDormant = false
