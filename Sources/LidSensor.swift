@@ -90,14 +90,46 @@ public final class LidSensor {
             animateFold()
         }
     }
+
+    /// Check for the dedicated lid-angle sensor without opening HID devices.
+    /// Nil means the registry query itself was inconclusive.
+    private static func lidAngleSensorPresenceInIORegistry() -> Bool? {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(
+            kIOMainPortDefault,
+            IOServiceMatching("IOHIDDevice"),
+            &iterator
+        ) == KERN_SUCCESS else { return nil }
+        defer { IOObjectRelease(iterator) }
+
+        func property(_ service: io_service_t, _ key: String) -> CFTypeRef? {
+            IORegistryEntryCreateCFProperty(service, key as CFString, kCFAllocatorDefault, 0)?
+                .takeRetainedValue()
+        }
+
+        var sawHIDDevice = false
+        while case let service = IOIteratorNext(iterator), service != 0 {
+            sawHIDDevice = true
+            defer { IOObjectRelease(service) }
+
+            let product = (property(service, kIOHIDProductKey) as? String) ?? ""
+            if product.lowercased() == "las" { return true }
+
+            let pid = (property(service, kIOHIDProductIDKey) as? NSNumber)?.intValue ?? 0
+            let page = (property(service, kIOHIDPrimaryUsagePageKey) as? NSNumber)?.intValue ?? 0
+            let usage = (property(service, kIOHIDPrimaryUsageKey) as? NSNumber)?.intValue ?? 0
+            if pid == 0x8104, page == 0x0020, usage == 0x008A { return true }
+        }
+        return sawHIDDevice ? false : nil
+    }
     
     private func setupManager() {
-        let manager = IOHIDManagerCreate(kCFAllocatorDefault, Self.noOptions)
-        guard IOHIDManagerOpen(manager, Self.noOptions) == kIOReturnSuccess else {
-            activateClamshellMode(reason: "IOHIDManager unavailable")
+        if Self.lidAngleSensorPresenceInIORegistry() == false {
+            activateClamshellMode(reason: "No continuous lid angle sensor found")
             return
         }
-        self.hidManager = manager
+
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, Self.noOptions)
         
         // Multi-Strategy Hardware Sensor Probing:
         // STRICTLY match only sensor hardware (UsagePage 0x20, PID 0x8104, "las").
@@ -114,12 +146,14 @@ public final class LidSensor {
             [
                 kIOHIDDeviceUsagePageKey as String: 0x0020,
                 kIOHIDDeviceUsageKey as String: 0x008A
-            ],
-            [
-                kIOHIDProductKey as String: "las"
             ]
         ]
         IOHIDManagerSetDeviceMatchingMultiple(manager, matchingCriteria as CFArray)
+        guard IOHIDManagerOpen(manager, Self.noOptions) == kIOReturnSuccess else {
+            activateClamshellMode(reason: "Lid sensor HID access unavailable")
+            return
+        }
+        self.hidManager = manager
         
         guard let devices = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else {
             activateClamshellMode(reason: "No sensor HID devices found")
@@ -143,8 +177,7 @@ public final class LidSensor {
             let isCandidate = prod.lowercased() == "las" ||
                               prod.lowercased().contains("lid") ||
                               prod.lowercased().contains("angle") ||
-                              (page == 32 && usage == 138) ||
-                              pid == 0x8104
+                              (page == 32 && usage == 138)
             
             if isCandidate {
                 if IOHIDDeviceOpen(dev, Self.noOptions) == kIOReturnSuccess {
