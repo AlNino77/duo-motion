@@ -45,10 +45,22 @@ public final class OverlayWindowController: NSObject {
             self?.handleWake()
         }
     }
+
+    /// A transparent top-level window still participates in WindowServer
+    /// composition. Ordering it out is the only truthful idle state.
+    private func hideOverlay(resetProgress: Bool = true) {
+        window?.alphaValue = 0.0
+        window?.orderOut(nil)
+        metalView?.isPaused = true
+        if resetProgress {
+            metalView?.currentTurn = 0.0
+            metalView?.closureProgress = 0.0
+            metalView?.motionDirection = MotionDirection.idle.rawValue
+        }
+    }
     
     private func handleSleep() {
-        metalView?.isPaused = true
-        window?.alphaValue = 0.0
+        hideOverlay()
         overlayLatched = false
         preArmCapturedThisMotion = false
         lastRawAngle = nil
@@ -196,10 +208,7 @@ public final class OverlayWindowController: NSObject {
             }
             mv.isPaused = false
         } else {
-            win.alphaValue = 0.0
-            mv.isPaused = true
-            mv.currentTurn = 0.0
-            mv.closureProgress = 0.0
+            hideOverlay()
             if angle >= preArmAngle {
                 preArmCapturedThisMotion = false
             }
@@ -226,11 +235,7 @@ public final class OverlayWindowController: NSObject {
         preArmCapturedThisMotion = false
         lastRawAngle = nil
         motionDirection = .idle
-        window?.alphaValue = 0.0
-        metalView?.isPaused = true
-        metalView?.currentTurn = 0.0
-        metalView?.closureProgress = 0.0
-        metalView?.motionDirection = MotionDirection.idle.rawValue
+        hideOverlay()
     }
     
     public func updateWindowLevel() {
