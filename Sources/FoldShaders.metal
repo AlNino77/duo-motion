@@ -43,50 +43,25 @@ inline float3 sampleSmoothMatteBlur(texture2d<float> tex,
                                     float2 uv,
                                     float radius,
                                     float2 cover,
-                                    float2 uiPixel,
-                                    float2 screenCoord) {
+                                    float2 uiPixel) {
     float2 tuv = (uv - 0.5) * cover + 0.5;
     
     if (radius <= 0.15) {
         return tex.sample(s, tuv, level(0.0)).rgb;
     }
     
-    // Keep mip levels tight so the frosted region stays continuous instead of
-    // turning into visible blocks on a Retina display.
-    float baseLod = clamp(log2(max(1.0, radius * 0.18)), 0.0, 1.85);
-    
-    // Per-pixel micro rotation breaks up concentric sampling bands.
-    float rot = (fract(sin(dot(screenCoord, float2(12.9898, 78.233))) * 43758.5453) - 0.5) * 0.35;
-    float cosRot = cos(rot);
-    float sinRot = sin(rot);
-    
-    float3 accum = float3(0.0);
-    float totalWeight = 0.0;
-    
-    constexpr int NUM_SAMPLES = 32;
-    constexpr float GOLDEN_ANGLE = 2.39996323;
-    
-    for (int i = 0; i < NUM_SAMPLES; i++) {
-        float fi = float(i);
-        float theta = fi * GOLDEN_ANGLE;
-        float r = sqrt((fi + 0.5) / float(NUM_SAMPLES));
-        
-        float uX = cos(theta);
-        float uY = sin(theta);
-        float dirX = uX * cosRot - uY * sinRot;
-        float dirY = uX * sinRot + uY * cosRot;
-        
-        float2 offset = float2(dirX, dirY) * (r * radius * uiPixel);
-        float2 sampleUV = clamp(tuv + offset, 0.0, 1.0);
-        
-        float weight = exp(-2.3 * r * r);
-        float sampleLod = mix(0.0, baseLod, smoothstep(0.1, 0.85, r));
-        
-        accum += tex.sample(s, sampleUV, level(sampleLod)).rgb * weight;
-        totalWeight += weight;
-    }
-    
-    float3 blurred = accum / totalWeight;
+    // Let the mip chain provide most of the blur radius, then use a small
+    // cross filter to keep the result smooth. The old 32-tap spiral evaluated
+    // trigonometry and exponentials per sample, per pixel, at 120 fps. On a
+    // Retina fullscreen surface that is enough work to make any GPU look sad.
+    float baseLod = clamp(log2(max(1.0, radius * 0.42)), 0.0, 5.0);
+    float2 tap = radius * 0.16 * uiPixel;
+
+    float3 blurred = tex.sample(s, tuv, level(baseLod)).rgb * 0.40;
+    blurred += tex.sample(s, clamp(tuv + float2(tap.x, 0.0), 0.0, 1.0), level(baseLod)).rgb * 0.15;
+    blurred += tex.sample(s, clamp(tuv - float2(tap.x, 0.0), 0.0, 1.0), level(baseLod)).rgb * 0.15;
+    blurred += tex.sample(s, clamp(tuv + float2(0.0, tap.y), 0.0, 1.0), level(baseLod)).rgb * 0.15;
+    blurred += tex.sample(s, clamp(tuv - float2(0.0, tap.y), 0.0, 1.0), level(baseLod)).rgb * 0.15;
     float matteScatter = 0.015 * smoothstep(0.0, 20.0, radius);
     blurred += float3(matteScatter);
     
@@ -104,7 +79,7 @@ fragment float4 foldFragment(VertexOut in [[stage_in]],
     float2 uiPixel = 2.0 / max(float2(1.0), u.imageSize);
     
     if (effect <= 0.00001 && closure <= 0.00001) {
-        return float4(sampleSmoothMatteBlur(tex, s, in.uv, 0.0, u.cover, uiPixel, in.position.xy), 1.0);
+        return float4(sampleSmoothMatteBlur(tex, s, in.uv, 0.0, u.cover, uiPixel), 1.0);
     }
     
     // Bottom-hinge clamshell geometry. The content closest to the hinge remains
@@ -142,7 +117,7 @@ fragment float4 foldFragment(VertexOut in [[stage_in]],
     float softness = fwidth(in.uv.x) + radius * 0.0017;
     float mask = 1.0 - smoothstep(0.5 - softness, 0.5 + softness, abs(plane.x - 0.5));
     
-    float3 color = sampleSmoothMatteBlur(tex, s, plane, radius, u.cover, uiPixel, in.position.xy);
+    float3 color = sampleSmoothMatteBlur(tex, s, plane, radius, u.cover, uiPixel);
     
     // Glass behavior: gentle absorption plus a broad specular band. Opening gets a
     // small reflection lift so the surface reads as glass before full sharpness returns.

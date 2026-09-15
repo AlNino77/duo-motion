@@ -28,6 +28,7 @@ public final class LidSensor {
     private var isActivelyClosing: Bool = false
     private var hasPreArmedInThisMotion: Bool = false
     private var lastPreArmTime: CFTimeInterval = 0
+    private var lastUIStatePublishTime: CFTimeInterval = 0
     private var stationaryFrames: Int = 0
     
     // Clamshell mode animation state (MacBook Neo, M1, etc.)
@@ -288,7 +289,9 @@ public final class LidSensor {
                     // If lid is safely open, reset pre-arm latch and mark capture engine dormant
                     if angle >= settings.startTiltAngle || (!isActivelyClosing && angle >= settings.startTiltAngle - 10.0) {
                         hasPreArmedInThisMotion = false
-                        settings.isScreenCaptureDormant = true
+                        if !settings.isScreenCaptureDormant {
+                            settings.isScreenCaptureDormant = true
+                        }
                     }
                     
                     // Hardware Pre-Arming Capture Zone:
@@ -305,9 +308,19 @@ public final class LidSensor {
                     
                     previousRawAngle = angle
                     currentRawAngle = angle
-                    settings.currentLidAngle = angle
-                    settings.isClosing = isActivelyClosing
-                    settings.isSensorConnected = true
+                    // The renderer still receives all 60 Hz sensor samples below.
+                    // Published UI state only needs human-readable cadence; pushing
+                    // it every tick needlessly invalidates the entire SwiftUI panel.
+                    if nowTime - lastUIStatePublishTime >= 1.0 / 15.0 {
+                        lastUIStatePublishTime = nowTime
+                        settings.currentLidAngle = angle
+                    }
+                    if settings.isClosing != isActivelyClosing {
+                        settings.isClosing = isActivelyClosing
+                    }
+                    if !settings.isSensorConnected {
+                        settings.isSensorConnected = true
+                    }
                 } else {
                     // Device connection may have dropped or suspended during deep sleep
                     isDeviceOpen = false

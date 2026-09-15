@@ -1,6 +1,6 @@
-# macTilt
+# DuoMo
 
-The **macTilt** 3D clamshell fold animation for MacBooks driven by the physical lid angle sensor.
+**DuoMo** is a 3D clamshell fold animation for MacBooks driven by the physical lid angle sensor.
 
 > *"When the lid closes, the picture on its screen stays where it is in space while the hardware sweeps through it: the image frosts over and slips into black without ever changing its size."*
 
@@ -8,7 +8,7 @@ Rather than rendering inside a separate window, **the entire macOS display follo
 
 ## NOTE
 - **Opening MacBook**: it's not possible to do it on lock screen due to macOS restrictions (without disabling SIP, which i don’t recommend). Because in that case any malicious app would be able to draw a login flow on your lock screen and steal your passwords. But i have implemented the animation for opening when screen is unlocked
-- **Normal MacBook Use**: When you are actively using your MacBook (lid is open), the app does **nothing** (overlay is completely hidden, zero CPU/GPU overhead, full click-through).
+- **Normal MacBook Use**: When the lid is open, the overlay stays hidden and the renderer and live screen capture remain dormant. The lightweight lid sensor stays active so DuoMo can detect a fold.
 - **Closing MacBook**: As you tilt the screen closed, the display freezes the screen and seamlessly folds **from up to down** toward the bottom keyboard hinge into the dark void.
 ---
 
@@ -21,39 +21,46 @@ Rather than rendering inside a separate window, **the entire macOS display follo
   - Glass tint and specular rim reflections
   - Dark void horizon falloff
 - 🖥️ **Full-Screen Seamless Overlay**: Spans the entire screen at `.screenSaver` level. Completely click-through and invisible when open, freezing and folding into 3D space on tilt.
-- 🎛️ **Liquid Glass Desktop App**: Built with crisp native styling and Swift native `.glass` APIs (`.glassEffect()`, `.buttonStyle(.glass)`, `.buttonStyle(.glassProminent)`):
-  - **Menu Bar Display Toggle**: Option to hide or show the numerical lid sensor angle from the menu bar.
-  - **Screen Recording Permission Check**: Real-time permission status check and one-click authorization request.
-  - **Tilt Trigger Customization**: Customize exactly when the animation starts (e.g. 80°) and when full fold is reached (e.g. 3°).
-  - **Follow Responsiveness**: Tune the exponential smoothing physics.
-  - **Image Source**: Live Screen Capture (`ScreenCaptureKit`), Desktop Wallpaper, Bundled Artwork, or Custom Photo.
-  - **Test Preview Slider**: Scrub and preview the up-to-down closing fold interactively without moving your MacBook lid.
-- 🍸 **Menu Bar Extra**: Quick angle readout (e.g. `126°`), status monitoring, and settings shortcuts.
-- 🚀 **Automated Build & Install (`build.sh`)**: Increments the version number and build number automatically on each run and installs the `.app` directly to `/Applications`.
+- 🎛️ **Native Settings Panel**: A compact SwiftUI panel using a 2×2 status layout and grouped settings:
+  - **Liquid Glass Status Tiles**: Status, Screen Recording permission, Energy, and live lid angle use native Liquid Glass on macOS 26. Secondary details appear only as hover help.
+  - **Angle**: Configure Start Fold and Full Fold. If a new Start Fold value would activate at the current lid position, DuoMo asks for confirmation before saving it.
+  - **Motion**: Tune follow response, blur, and glass reflection.
+  - **Advanced**: Control wake-transition priority.
+  - **Live Capture Only**: The fold always uses the current display without a separate source selector.
+- 🍸 **Menu Bar Extra**: Sensor status, settings, screen recapture, and quit actions without a numerical angle readout.
+- 🚀 **Controlled Releases (`build.sh`)**: Builds the current version without silently changing it, and supports explicit semantic version and build-number updates.
 
 ---
 
 ## Requirements
 
 - macOS 14.0 or later (Apple Silicon or Intel MacBook with lid angle sensor)
+- macOS 26 for native Liquid Glass status tiles; earlier versions use a system-material fallback
 - Xcode Command Line Tools (`swiftc`, `xcrun metal`)
 
 ---
 
 ## Building & Installing
 
-Run the automated build script:
+Build and install the current version from `Info.plist`:
 
 ```bash
 ./build.sh
 ```
 
-Every time `./build.sh` is executed:
-1. It automatically increments the patch version (e.g. `1.0.0` → `1.0.1`) and build number (e.g. `1` → `2`) in `Info.plist`.
-2. Compiles the Metal shaders into `default.metallib`.
-3. Compiles the Swift application.
-4. Codesigns the app bundle ad-hoc.
-5. Installs the new version directly to `/Applications/macTilt.app`.
+Create a release with an explicit version and build number:
+
+```bash
+./build.sh --version 1.0.1 --build 2
+```
+
+Build without installing:
+
+```bash
+./build.sh --no-install
+```
+
+The script compiles the Metal shaders and universal Swift application, signs the app, creates `DuoMo-vX.Y.Z.dmg`, and installs to `/Applications/DuoMo.app` unless `--no-install` is supplied. The Bundle ID is `com.lqsky7.duomo`.
 
 ---
 
@@ -62,10 +69,10 @@ Every time `./build.sh` is executed:
 Open the installed application from `/Applications` or run:
 
 ```bash
-open /Applications/macTilt.app
+open /Applications/DuoMo.app
 ```
 
-The menu bar icon will display your current lid status. The Liquid Glass control panel allows you to customize the tilt thresholds and test the animation live!
+The menu bar icon displays the sensor state. The settings panel groups controls under Angle, Motion, and Advanced. Changes save automatically, so the window closes with the standard macOS close control rather than a separate Done button.
 
 ---
 

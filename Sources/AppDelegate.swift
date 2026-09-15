@@ -17,13 +17,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         sensor.start()
         
-        // On first launch, open the Apple HCI Onboarding window; otherwise open the control panel
+        // Open the single control panel. Permission guidance lives inline there.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            if !AppSettings.shared.hasCompletedOnboarding {
-                MenuBarController.shared.openOnboardingWindow()
-            } else {
-                MenuBarController.shared.openControlPanel()
-            }
+            MenuBarController.shared.openControlPanel()
         }
     }
     
