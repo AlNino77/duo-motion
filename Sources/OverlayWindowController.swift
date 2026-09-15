@@ -101,6 +101,7 @@ public final class OverlayWindowController: NSObject {
 
     private func handleDisplayReconfiguration() {
         refreshSuppression()
+        ScreenCapture.shared.invalidateCaches()
         if suppressForClamshell {
             stopOverlay()
             return

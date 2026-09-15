@@ -5,8 +5,33 @@ import ScreenCaptureKit
 
 public final class ScreenCapture {
     public static let shared = ScreenCapture()
+
+    private let cacheLock = NSLock()
+    private var cachedContent: (content: SCShareableContent, date: Date)?
+    private var cachedFilter: (
+        filter: SCContentFilter,
+        displayID: CGDirectDisplayID,
+        width: Int,
+        height: Int,
+        date: Date
+    )?
+    private static let contentCacheTTL: TimeInterval = 5.0
+    private static let filterCacheTTL: TimeInterval = 1.5
     
     private init() {}
+
+    public func invalidateCaches() {
+        cacheLock.lock()
+        cachedContent = nil
+        cachedFilter = nil
+        cacheLock.unlock()
+    }
+
+    static func preferredDisplay(from content: SCShareableContent) -> SCDisplay? {
+        content.displays.first(where: {
+            CGDisplayIsBuiltin($0.displayID) != 0
+        }) ?? content.displays.first
+    }
     
     /// Fast synchronous preflight
     public func hasPermission() -> Bool {
@@ -81,7 +106,7 @@ public final class ScreenCapture {
         
         switch settings.imageSourceMode {
         case .liveCapture:
-            guard await verifyPermissionAsync() else { return nil }
+            guard hasPermission() else { return nil }
             return await captureLiveScreen()
             
         case .desktopWallpaper:
@@ -103,36 +128,77 @@ public final class ScreenCapture {
     /// Live display capture using ScreenCaptureKit
     public func captureLiveScreen() async -> CGImage? {
         do {
-            let content: SCShareableContent
-            if #available(macOS 14.4, *) {
-                content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            } else {
-                content = try await SCShareableContent.current
-            }
-            guard let display = content.displays.first(where: {
-                CGDisplayIsBuiltin($0.displayID) != 0
-            }) ?? content.displays.first else { return nil }
-            
-            // Exclude our own app's windows
-            let currentAppPID = NSRunningApplication.current.processIdentifier
-            let excludedWindows = content.windows.filter { $0.owningApplication?.processID == currentAppPID }
-            
+            let content = try await freshShareableContent()
+            guard let display = Self.preferredDisplay(from: content) else { return nil }
+            let filter = displayFilter(for: display, in: content)
             let scale = await MainActor.run {
                 DisplayTopology.builtInBackingScale()
             }
-            let filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
             let config = SCStreamConfiguration()
             config.width = Int(Double(display.width) * scale)
             config.height = Int(Double(display.height) * scale)
-            config.showsCursor = true
+            config.showsCursor = false
             config.pixelFormat = kCVPixelFormatType_32BGRA
             config.colorSpaceName = CGColorSpace.sRGB
             
             return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
         } catch {
             print("[ScreenCapture] ScreenCaptureKit error: \(error)")
+            invalidateCaches()
             return nil
         }
+    }
+
+    private func freshShareableContent() async throws -> SCShareableContent {
+        let cached = cachedContentSnapshot()
+        if let cached,
+           Date().timeIntervalSince(cached.date) < Self.contentCacheTTL {
+            return cached.content
+        }
+
+        let content: SCShareableContent
+        if #available(macOS 14.4, *) {
+            content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        } else {
+            content = try await SCShareableContent.current
+        }
+        storeCachedContent(content)
+        return content
+    }
+
+    private func cachedContentSnapshot() -> (content: SCShareableContent, date: Date)? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return cachedContent
+    }
+
+    private func storeCachedContent(_ content: SCShareableContent) {
+        cacheLock.lock()
+        cachedContent = (content, Date())
+        cacheLock.unlock()
+    }
+
+    private func displayFilter(for display: SCDisplay, in content: SCShareableContent) -> SCContentFilter {
+        cacheLock.lock()
+        let cached = cachedFilter
+        cacheLock.unlock()
+        if let cached,
+           cached.displayID == display.displayID,
+           cached.width == display.width,
+           cached.height == display.height,
+           Date().timeIntervalSince(cached.date) < Self.filterCacheTTL {
+            return cached.filter
+        }
+
+        let currentPID = NSRunningApplication.current.processIdentifier
+        let excludedWindows = content.windows.filter {
+            $0.owningApplication?.processID == currentPID
+        }
+        let filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
+        cacheLock.lock()
+        cachedFilter = (filter, display.displayID, display.width, display.height, Date())
+        cacheLock.unlock()
+        return filter
     }
     
     /// Get user's current desktop wallpaper
