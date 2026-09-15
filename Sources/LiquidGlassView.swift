@@ -1,628 +1,478 @@
 import SwiftUI
 import AppKit
 
-// Adaptive systemGray6 matching Apple HCI for macOS dark/light mode
-private let cardBackground = Color(nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        ? NSColor(red: 0.14, green: 0.14, blue: 0.16, alpha: 1.0) // macOS systemGray6 dark
-        : NSColor(red: 0.95, green: 0.95, blue: 0.97, alpha: 1.0) // macOS systemGray6 light
-}))
-
-private let cardBorder = Color(nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        ? NSColor(white: 1.0, alpha: 0.08)
-        : NSColor(white: 0.0, alpha: 0.08)
-}))
-
 public struct LiquidGlassControlPanel: View {
-    @ObservedObject var settings: AppSettings = AppSettings.shared
-    @State private var copiedResetCommand: Bool = false
-    @State private var showingPermissionTroubleshooting: Bool = false
-    private let resetCommand = "tccutil reset ScreenCapture com.lqsky7.mactilt"
-    
-    public init() {}
-    
+    public static let preferredHeight: CGFloat = 680
+
+    @ObservedObject private var settings: AppSettings = .shared
+    @State private var startFoldDraft: Double
+    @State private var pendingStartFoldAngle: Double?
+    @State private var showingStartFoldWarning = false
+
+    private let panelHeight: CGFloat
+
+    public init(panelHeight: CGFloat = Self.preferredHeight) {
+        self.panelHeight = panelHeight
+        _startFoldDraft = State(initialValue: AppSettings.shared.startTiltAngle)
+    }
+
     public var body: some View {
         VStack(spacing: 0) {
-            // Top Header Bar
-            headerBar
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
+            header
+                .padding(.horizontal, 22)
+                .padding(.top, 18)
                 .padding(.bottom, 14)
-            
+
+            statusTiles
+                .padding(.horizontal, 22)
+                .padding(.bottom, 18)
+
             Divider()
-            
-            // Main Settings Scroll Area (All cards match exactly in horizontal width)
-            ScrollView {
-                VStack(spacing: 14) {
-                    // Screen Recording Permission Card
-                    permissionCard
-                    
-                    // Battery & Performance Card
-                    batteryCard
-                    
-                    // Tilt Trigger Angles Card
-                    tiltCard
-                    
-                    // Display Source & Menu Bar Card
-                    displaySourceCard
-                    
-                    // Animation Physics & Shaders Card
-                    animationPhysicsCard
-                    
-                    // Lock Screen & Sleep Wake Card (Optional)
-                    lockScreenCard
-                    
-                    // Interactive Test Slider Card
-                    testPreviewCard
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
-            }
-            
-            Divider()
-            
-            // Bottom Action Footer
-            footerBar
-                .padding(.horizontal, 20)
-                .padding(.vertical, 14)
+
+            settingsForm
         }
-        .frame(width: 500, height: 650)
+        .frame(width: 460, height: panelHeight)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
+            startFoldDraft = settings.startTiltAngle
             settings.refreshPermissions()
         }
         .onDisappear {
             settings.isTestModeActive = false
-            settings.testTurnValue = 0.0
+            settings.testTurnValue = 0
             OverlayWindowController.shared.stopOverlay()
         }
-    }
-    
-    // MARK: - Header Bar
-    private var headerBar: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(cardBackground)
-                    .frame(width: 44, height: 44)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(cardBorder, lineWidth: 0.5)
-                    )
-                
-                Image(systemName: "laptopcomputer")
-                    .font(.system(size: 22, weight: .medium))
-                    .foregroundStyle(settings.isSensorConnected ? Color.accentColor : Color.secondary)
+        .alert("Settings may become unavailable", isPresented: $showingStartFoldWarning) {
+            Button(keepCurrentStartFoldLabel, role: .cancel) {
+                startFoldDraft = settings.startTiltAngle
+                pendingStartFoldAngle = nil
             }
-            
-            VStack(alignment: .leading, spacing: 2) {
-                Text("macTilt")
-                    .font(.title3)
-                    .fontWeight(.bold)
-                
-                Text("MacBook Clamshell Fold Animation")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            
-            Spacer()
-            
-            // Real-time Hardware Angle Badge
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(settings.isSensorConnected ? Color.green : Color.orange)
-                    .frame(width: 8, height: 8)
-                
-                VStack(alignment: .trailing, spacing: 1) {
-                    Text("\(Int(settings.currentLidAngle))°")
-                        .font(.system(size: 18, weight: .bold, design: .rounded))
-                    Text(angleStatusText)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+
+            Button(usePendingStartFoldLabel) {
+                if let pendingStartFoldAngle {
+                    settings.startTiltAngle = pendingStartFoldAngle
+                    startFoldDraft = pendingStartFoldAngle
                 }
+                self.pendingStartFoldAngle = nil
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(cardBorder, lineWidth: 0.5)
+        } message: {
+            Text(startFoldWarningMessage)
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 40, height: 40)
+
+            Text("DuoMo")
+                .font(.title3.weight(.semibold))
+
+            Spacer()
+
+            Text(versionText)
+                .font(.caption.weight(.medium).monospacedDigit())
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    @ViewBuilder
+    private var statusTiles: some View {
+        if #available(macOS 26.0, *) {
+            NativeLiquidGlassStatusTiles(
+                settings: settings,
+                requestPermission: requestScreenRecordingPermission
+            )
+        } else {
+            LegacyStatusTiles(
+                settings: settings,
+                requestPermission: requestScreenRecordingPermission
             )
         }
     }
-    
-    private var angleStatusText: String {
-        if settings.currentLidAngle >= settings.startTiltAngle {
-            return "Using Mac (Open)"
-        } else if settings.currentLidAngle <= settings.endTiltAngle {
-            return "Lid Closed"
-        } else {
-            let pct = Int(settings.normalizedTurn(for: settings.currentLidAngle) * 100)
-            return "Fold (\(pct)%)"
-        }
-    }
-    
-    // MARK: - Screen Recording Permission Card
-    private var permissionCard: some View {
-        HCISectionCard(title: "Screen Recording Permission", icon: "video.badge.checkmark") {
-            HStack(spacing: 10) {
-                Image(systemName: settings.hasScreenRecordingPermission ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(settings.hasScreenRecordingPermission ? Color.green : Color.orange)
-                    .font(.system(size: 15))
-                
-                Text(settings.hasScreenRecordingPermission ? "Permission Active" : "Permission Required")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                
-                InfoButton("Screen Recording", content: "macTilt requires Screen Recording permission to freeze and fold your active desktop in 3D space as you close the lid. All processing is strictly on-device.")
-                
-                Spacer()
-                
-                Button {
-                    settings.refreshPermissions()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("Re-check permission")
-                
-                if !settings.hasScreenRecordingPermission {
-                    Button("Grant Access") {
-                        if !ScreenCapture.shared.requestPermission() {
-                            ScreenCapture.shared.openSettings()
-                        }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            settings.refreshPermissions()
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    
-                    Button {
-                        showingPermissionTroubleshooting.toggle()
-                    } label: {
-                        Image(systemName: "questionmark.circle")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("Permission troubleshooting")
-                    .popover(isPresented: $showingPermissionTroubleshooting, arrowEdge: .trailing) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Permission Troubleshooting")
-                                .font(.headline)
-                            
-                            Text("If already granted in System Settings, macOS requires an app restart to pick up the token.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            
-                            HStack {
-                                Button("Relaunch App") {
-                                    ScreenCapture.shared.relaunchApp()
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .controlSize(.small)
-                                
-                                Button(copiedResetCommand ? "Copied!" : "Copy Reset Command") {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(resetCommand, forType: .string)
-                                    copiedResetCommand = true
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                                        copiedResetCommand = false
-                                    }
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                            }
-                            
-                            Text(resetCommand)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .padding(6)
-                                .background(Color.primary.opacity(0.04))
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                        }
-                        .padding(14)
-                        .frame(width: 300)
-                    }
-                }
+
+    private var settingsForm: some View {
+        Form {
+            Section("Angle") {
+                SliderRow(
+                    title: "Start Fold",
+                    value: "\(Int(startFoldDraft.rounded()))\u{00B0}",
+                    help: "The fold begins when the lid moves below this angle.",
+                    selection: $startFoldDraft,
+                    range: 40...120,
+                    step: 1,
+                    onEditingChanged: handleStartFoldEditing
+                )
+
+                SliderRow(
+                    title: "Full Fold",
+                    value: "\(Int(settings.endTiltAngle))\u{00B0}",
+                    help: "The display reaches full darkness at this angle.",
+                    selection: $settings.endTiltAngle,
+                    range: 0...20,
+                    step: 1
+                )
             }
-        }
-    }
-    
-    // MARK: - Battery & Power Optimization Card
-    private var batteryCard: some View {
-        HCISectionCard(title: "Battery & Performance", icon: "battery.100.bolt") {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(Color.green)
-                    .frame(width: 8, height: 8)
-                
-                Text("Zero Idle Battery Impact")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .foregroundStyle(Color.green)
-                
-                InfoButton("Battery Efficiency", content: "macTilt is 100% dormant with 0 Hz background polling during normal use. Capture is pre-armed exclusively in the millisecond you start closing your display (~95°). Metal rendering is paused until the clamshell fold begins.")
-                
-                Spacer()
-                
-                Text(settings.isScreenCaptureDormant ? "Dormant" : "Pre-Arming")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color.primary.opacity(0.05))
-                    .clipShape(Capsule())
+
+            Section("Motion") {
+                SliderRow(
+                    title: "Follow Response",
+                    value: String(format: "%.0f", settings.followSpeed),
+                    help: "Controls how quickly the rendered fold catches the physical lid movement.",
+                    selection: $settings.followSpeed,
+                    range: 6...30,
+                    step: 1
+                )
+
+                SliderRow(
+                    title: "Blur",
+                    value: String(format: "%.1fx", settings.blurStrength),
+                    help: "Controls the optical defocus as the display folds away.",
+                    selection: $settings.blurStrength,
+                    range: 0.2...2,
+                    step: 0.1
+                )
+
+                SliderRow(
+                    title: "Reflection",
+                    value: String(format: "%.1fx", settings.reflectionIntensity),
+                    help: "Controls the glass reflection across the moving display.",
+                    selection: $settings.reflectionIntensity,
+                    range: 0...2.5,
+                    step: 0.1
+                )
             }
-        }
-    }
-    
-    // MARK: - Tilt Triggers Card
-    private var tiltCard: some View {
-        HCISectionCard(title: "Tilt Trigger Thresholds", icon: "angle") {
-            VStack(spacing: 12) {
-                // Start Angle Slider Row
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Start Fold Angle")
-                            .font(.subheadline)
-                        
-                        InfoButton("Start Angle", content: "The MacBook remains in normal usable state above this angle. Folding begins when closed below it.")
-                        
-                        Spacer()
-                        
-                        Text("\(Int(settings.startTiltAngle))°")
-                            .font(.subheadline)
-                            .fontWeight(.semibold)
-                            .monospacedDigit()
-                    }
-                    Slider(value: $settings.startTiltAngle, in: 40...120, step: 1)
-                }
-                
-                Divider()
-                
-                // End Angle Slider Row
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Full Fold Angle")
-                            .font(.subheadline)
-                        
-                        InfoButton("Full Fold Angle", content: "The animation scales smoothly across the closing movement and darkens completely into black at this angle.")
-                        
-                        Spacer()
-                        
-                        Text("\(Int(settings.endTiltAngle))°")
-                            .font(.subheadline)
-                            .fontWeight(.semibold)
-                            .monospacedDigit()
-                    }
-                    Slider(value: $settings.endTiltAngle, in: 0...20, step: 1)
-                }
-            }
-        }
-    }
-    
-    // MARK: - Display Source & Menu Bar Card
-    private var displaySourceCard: some View {
-        HCISectionCard(title: "Display & Menu Bar", icon: "display") {
-            VStack(spacing: 12) {
-                // Display Source Picker Row
-                HStack {
-                    Text("Screen Source")
-                        .font(.subheadline)
-                    
-                    InfoButton("Screen Source", content: "Choose between live desktop window freezing, current desktop wallpaper, bundled artwork, or a custom image.")
-                    
-                    Spacer()
-                    
-                    Picker("", selection: $settings.imageSourceMode) {
-                        ForEach(ImageSourceMode.allCases) { mode in
-                            Text(mode.title).tag(mode)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .frame(width: 170)
-                }
-                
-                if settings.imageSourceMode == .customImage {
-                    HStack {
-                        Text(settings.customImagePath.isEmpty ? "No custom photo selected" : (settings.customImagePath as NSString).lastPathComponent)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer()
-                        Button("Choose Image...") {
-                            selectCustomImage()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                }
-                
-                Divider()
-                
-                // Menu Bar Toggle Row
-                HStack {
-                    Text("Show Lid Angle in Menu Bar")
-                        .font(.subheadline)
-                    
-                    InfoButton("Menu Bar Display", content: "Displays the live numerical degree readout (e.g. 120°) next to the status icon.")
-                    
-                    Spacer()
-                    
-                    Toggle("", isOn: $settings.showAngleInMenuBar)
-                        .labelsHidden()
-                }
-            }
-        }
-    }
-    
-    // MARK: - Animation Physics Card
-    private var animationPhysicsCard: some View {
-        HCISectionCard(title: "Physics & Shaders", icon: "slider.horizontal.3") {
-            VStack(spacing: 12) {
-                // Follow Speed
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Follow Responsiveness")
-                            .font(.subheadline)
-                        
-                        InfoButton("Follow Speed", content: "Controls the exponential smoothing physics of the display turn.")
-                        
-                        Spacer()
-                        
-                        Text(String(format: "%.0f", settings.followSpeed))
-                            .font(.subheadline)
-                            .fontWeight(.semibold)
-                            .monospacedDigit()
-                    }
-                    Slider(value: $settings.followSpeed, in: 6...30, step: 1)
-                }
-                
-                Divider()
-                
-                // Blur and Glass Dual Sliders
-                HStack(spacing: 20) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Blur Intensity")
-                                .font(.subheadline)
-                            Spacer()
-                            Text(String(format: "%.1fx", settings.blurStrength))
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                                .monospacedDigit()
-                        }
-                        Slider(value: $settings.blurStrength, in: 0.2...2.0, step: 0.1)
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Glass Reflection")
-                                .font(.subheadline)
-                            Spacer()
-                            Text(String(format: "%.1fx", settings.reflectionIntensity))
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                                .monospacedDigit()
-                        }
-                        Slider(value: $settings.reflectionIntensity, in: 0.0...2.5, step: 0.1)
-                    }
-                }
-            }
-        }
-    }
-    
-    // MARK: - Lock Screen & Sleep Wake Card (Optional)
-    private var lockScreenCard: some View {
-        HCISectionCard(title: "Lock Screen & Sleep Wake", icon: "lock.shield") {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
+
+            Section("Advanced") {
+                HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("High Priority Display Level")
-                            .font(.subheadline)
-                        Text("Elevates overlay priority to display during wake transitions.")
+                        Text("Prioritize Wake Transition")
+                            .font(.subheadline.weight(.medium))
+                        Text("Keeps the fold layer above normal windows during wake.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    
-                    InfoButton("Lock Screen Wake", content: "macOS isolates the password Lock Screen for security. To see the animation unfold dynamically on wake, set a 1-minute password grace period in System Settings > Lock Screen, or use Apple Watch Auto-Unlock.")
-                    
+
+                    InfoButton(
+                        "Wake transition",
+                        content: "macOS protects the password screen. This setting raises the overlay where the system permits it, but it cannot bypass lock-screen security."
+                    )
+
                     Spacer()
-                    
+
                     Toggle("", isOn: $settings.enableLockScreenPriority)
                         .labelsHidden()
                 }
-                
-                Divider()
-                
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Preview Fold Animation")
-                            .font(.subheadline)
-                        Text(settings.isHardwareSensor ? "Test full fold-and-unfold transition sequence." : "Simulate auto sleep & wake animation (MacBook Neo / M1 mode).")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    
-                    Spacer()
-                    
-                    Button("Trigger Fold Preview") {
-                        LidSensor.shared.triggerPreviewAnimation()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                }
             }
         }
+        .formStyle(.grouped)
     }
-    
-    // MARK: - Test Preview Card
-    private var testPreviewCard: some View {
-        HCISectionCard(title: "Interactive Preview", icon: "play.rectangle") {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("Preview Animation")
-                        .font(.subheadline)
-                    
-                    InfoButton("Interactive Preview", content: "Scrub and inspect the fold on your screen without physically moving the lid.")
-                    
-                    Spacer()
-                    
-                    Toggle("", isOn: $settings.isTestModeActive)
-                        .labelsHidden()
-                        .onChange(of: settings.isTestModeActive) { _, newValue in
-                            if !newValue {
-                                // Immediately clear turn value so the overlay hides at once
-                                settings.testTurnValue = 0.0
-                            }
-                        }
-                }
-                
-                if settings.isTestModeActive {
-                    Divider()
-                    
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Fold Progress")
-                                .font(.subheadline)
-                            Spacer()
-                            Text("\(Int(settings.testTurnValue * 100))%")
-                                .font(.subheadline)
-                                .fontWeight(.bold)
-                                .monospacedDigit()
-                        }
-                        Slider(value: $settings.testTurnValue, in: 0.0...1.0) { isEditing in
-                            if isEditing {
-                                settings.isTestModeActive = true
-                                OverlayWindowController.shared.captureScreenAsync()
-                            } else {
-                                // Stop the overlay on screen as soon as the user leaves the slider
-                                withAnimation(.easeOut(duration: 0.25)) {
-                                    settings.testTurnValue = 0.0
-                                }
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                                    if settings.testTurnValue == 0.0 {
-                                        settings.isTestModeActive = false
-                                        OverlayWindowController.shared.stopOverlay()
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    .transition(.opacity)
-                }
-            }
+
+    private var versionText: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        return "v\(version ?? "1.0.0")"
+    }
+
+    private var keepCurrentStartFoldLabel: String {
+        "Keep \(Int(settings.startTiltAngle.rounded()))\u{00B0}"
+    }
+
+    private var usePendingStartFoldLabel: String {
+        "Use \(Int((pendingStartFoldAngle ?? startFoldDraft).rounded()))\u{00B0}"
+    }
+
+    private var startFoldWarningMessage: String {
+        let currentAngle = Int(settings.currentLidAngle.rounded())
+        let proposedAngle = Int((pendingStartFoldAngle ?? startFoldDraft).rounded())
+        return "Your Mac is currently open to \(currentAngle)\u{00B0}. Setting Start Fold to \(proposedAngle)\u{00B0} will activate the fold effect now. The settings panel may remain hidden until you open the display beyond \(proposedAngle)\u{00B0}."
+    }
+
+    private func handleStartFoldEditing(_ isEditing: Bool) {
+        guard !isEditing else { return }
+
+        let proposedAngle = startFoldDraft
+        guard abs(proposedAngle - settings.startTiltAngle) >= 0.5 else { return }
+
+        if settings.isSensorConnected && proposedAngle > settings.currentLidAngle {
+            pendingStartFoldAngle = proposedAngle
+            showingStartFoldWarning = true
+        } else {
+            settings.startTiltAngle = proposedAngle
         }
     }
-    
-    // MARK: - Bottom Footer Bar
-    private var footerBar: some View {
-        HStack {
-            Button("Reset to Defaults") {
-                settings.startTiltAngle = 115.0
-                settings.endTiltAngle = 3.0
-                settings.followSpeed = 16.0
-                settings.imageSourceMode = .liveCapture
-                settings.blurStrength = 0.5
-                settings.reflectionIntensity = 0.0
-                settings.showAngleInMenuBar = true
-                settings.isTestModeActive = false
-                settings.testTurnValue = 0.0
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
-            
-            Button("Welcome Guide") {
-                MenuBarController.shared.openOnboardingWindow()
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
-            
-            Spacer()
-            
-            Button("Done") {
-                settings.isTestModeActive = false
-                settings.testTurnValue = 0.0
-                OverlayWindowController.shared.stopOverlay()
-                NSApp.keyWindow?.orderOut(nil)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.regular)
-            .keyboardShortcut(.defaultAction)
+
+    private func requestScreenRecordingPermission() {
+        if !ScreenCapture.shared.requestPermission() {
+            ScreenCapture.shared.openSettings()
         }
-    }
-    
-    private func selectCustomImage() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.image, .png, .jpeg]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        if panel.runModal() == .OK, let url = panel.url {
-            settings.customImagePath = url.path
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            settings.refreshPermissions()
         }
     }
 }
 
-// MARK: - Apple HCI Grouped Section Card Component
-private struct HCISectionCard<Content: View>: View {
-    let title: String
-    let icon: String
-    let content: Content
-    
-    init(title: String, icon: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.icon = icon
-        self.content = content()
-    }
-    
+@available(macOS 26.0, *)
+private struct NativeLiquidGlassStatusTiles: View {
+    @ObservedObject var settings: AppSettings
+    let requestPermission: () -> Void
+
+    private let columns = [
+        GridItem(.flexible(), spacing: 10),
+        GridItem(.flexible(), spacing: 10)
+    ]
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Card Title Label
+        GlassEffectContainer(spacing: 10) {
+            LazyVGrid(columns: columns, spacing: 10) {
+                NativeStatusTile(title: "Status") {
+                    SensorStatusValue(settings: settings)
+                }
+
+                NativeStatusTile(title: "Permission") {
+                    PermissionStatusValue(
+                        settings: settings,
+                        requestPermission: requestPermission
+                    )
+                }
+
+                NativeStatusTile(title: "Energy") {
+                    EnergyStatusValue(settings: settings)
+                }
+
+                NativeStatusTile(title: "Angle") {
+                    AngleStatusValue(settings: settings)
+                }
+            }
+        }
+    }
+}
+
+@available(macOS 26.0, *)
+private struct NativeStatusTile<Value: View>: View {
+    let title: String
+    let value: Value
+
+    init(title: String, @ViewBuilder value: () -> Value) {
+        self.title = title
+        self.value = value()
+    }
+
+    var body: some View {
+        StatusTileContent(title: title) {
+            value
+        }
+        .glassEffect(
+            .regular,
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+    }
+}
+
+private struct LegacyStatusTiles: View {
+    @ObservedObject var settings: AppSettings
+    let requestPermission: () -> Void
+
+    private let columns = [
+        GridItem(.flexible(), spacing: 10),
+        GridItem(.flexible(), spacing: 10)
+    ]
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 10) {
+            LegacyStatusTile(title: "Status") {
+                SensorStatusValue(settings: settings)
+            }
+
+            LegacyStatusTile(title: "Permission") {
+                PermissionStatusValue(
+                    settings: settings,
+                    requestPermission: requestPermission
+                )
+            }
+
+            LegacyStatusTile(title: "Energy") {
+                EnergyStatusValue(settings: settings)
+            }
+
+            LegacyStatusTile(title: "Angle") {
+                AngleStatusValue(settings: settings)
+            }
+        }
+    }
+}
+
+private struct LegacyStatusTile<Value: View>: View {
+    let title: String
+    let value: Value
+
+    init(title: String, @ViewBuilder value: () -> Value) {
+        self.title = title
+        self.value = value()
+    }
+
+    var body: some View {
+        StatusTileContent(title: title) {
+            value
+        }
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+    }
+}
+
+private struct StatusTileContent<Value: View>: View {
+    let title: String
+    let value: Value
+
+    init(title: String, @ViewBuilder value: () -> Value) {
+        self.title = title
+        self.value = value()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 5) {
+                Spacer(minLength: 0)
+                value
+            }
+            .font(.subheadline.weight(.semibold))
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
+    }
+}
+
+private struct SensorStatusValue: View {
+    @ObservedObject var settings: AppSettings
+
+    var body: some View {
+        Image(systemName: settings.isSensorConnected
+              ? "checkmark.circle.fill"
+              : "ellipsis.circle.fill")
+            .foregroundStyle(settings.isSensorConnected ? Color.green : Color.orange)
+            .help(settings.isSensorConnected ? "Lid sensor online." : "Looking for the lid sensor.")
+
+        Text(settings.isSensorConnected ? "Active" : "Connecting")
+    }
+}
+
+private struct PermissionStatusValue: View {
+    @ObservedObject var settings: AppSettings
+    let requestPermission: () -> Void
+
+    var body: some View {
+        if settings.hasScreenRecordingPermission {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(Color.green)
+                .help("Screen recording permission is active.")
+
+            Text("Screen Recording")
+        } else {
+            Button(action: requestPermission) {
+                HStack(spacing: 5) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color.orange)
+                    Text("Screen Recording")
+                }
+            }
+            .buttonStyle(.plain)
+            .help("Screen recording permission is required. Click to allow access.")
+        }
+    }
+}
+
+private struct EnergyStatusValue: View {
+    @ObservedObject var settings: AppSettings
+
+    var body: some View {
+        Text(settings.isScreenCaptureDormant ? "Idle" : "Active")
+
+        Image(systemName: "info.circle")
+            .foregroundStyle(.secondary)
+            .help(energyDetail)
+    }
+
+    private var energyDetail: String {
+        if settings.isScreenCaptureDormant {
+            return "Rendering and live screen capture are dormant. The lid sensor remains active."
+        }
+        return "Live screen capture and fold rendering are active."
+    }
+}
+
+private struct AngleStatusValue: View {
+    @ObservedObject var settings: AppSettings
+
+    var body: some View {
+        Text(angleValue)
+            .monospacedDigit()
+            .help(angleDetail)
+    }
+
+    private var angleValue: String {
+        settings.isSensorConnected
+            ? "\(Int(settings.currentLidAngle.rounded()))\u{00B0}"
+            : "--\u{00B0}"
+    }
+
+    private var angleDetail: String {
+        guard settings.isSensorConnected else { return "Lid angle is unavailable." }
+        if settings.currentLidAngle >= settings.startTiltAngle { return "The lid is open." }
+        if settings.currentLidAngle <= settings.endTiltAngle { return "The lid is closed." }
+        return "The lid is folding."
+    }
+}
+
+private struct SliderRow: View {
+    let title: String
+    let value: String
+    let help: String
+    @Binding var selection: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    var onEditingChanged: (Bool) -> Void = { _ in }
+
+    var body: some View {
+        VStack(spacing: 7) {
             HStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                
-                Text(title.uppercased())
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                Text(title)
+                    .font(.subheadline)
+                InfoButton(title, content: help)
+                Spacer()
+                Text(value)
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
             }
-            .padding(.leading, 2)
-            
-            // Card Content Container
-            VStack(alignment: .leading, spacing: 0) {
-                content
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(cardBorder, lineWidth: 0.5)
+
+            Slider(
+                value: $selection,
+                in: range,
+                step: step,
+                onEditingChanged: onEditingChanged
             )
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 4)
     }
 }
 
-// MARK: - Apple HCI Info Popover Button
 private struct InfoButton: View {
     let title: String
     let content: String
-    @State private var isShowing: Bool = false
-    
+    @State private var isShowing = false
+
     init(_ title: String = "", content: String) {
         self.title = title
         self.content = content
     }
-    
+
     var body: some View {
         Button {
             isShowing.toggle()
@@ -642,11 +492,9 @@ private struct InfoButton: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                    .lineSpacing(2)
             }
             .padding(12)
             .frame(width: 260)
         }
     }
 }
-

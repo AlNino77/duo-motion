@@ -8,6 +8,8 @@ public struct Uniforms {
     public var cover: SIMD2<Float>
     public var aspect: Float
     public var turn: Float
+    public var closureProgress: Float
+    public var motionDirection: Float
     public var blurStrength: Float
     public var reflectionIntensity: Float
     
@@ -15,12 +17,16 @@ public struct Uniforms {
                 cover: SIMD2<Float> = .init(1, 1),
                 aspect: Float = 1.0,
                 turn: Float = 0.0,
+                closureProgress: Float = 0.0,
+                motionDirection: Float = 0.0,
                 blurStrength: Float = 1.0,
                 reflectionIntensity: Float = 1.0) {
         self.imageSize = imageSize
         self.cover = cover
         self.aspect = aspect
         self.turn = turn
+        self.closureProgress = closureProgress
+        self.motionDirection = motionDirection
         self.blurStrength = blurStrength
         self.reflectionIntensity = reflectionIntensity
     }
@@ -30,11 +36,15 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
     private var commandQueue: MTLCommandQueue?
     private var pipelineState: MTLRenderPipelineState?
     private var samplerState: MTLSamplerState?
+    private let textureUploadQueue = DispatchQueue(label: "com.lqsky7.duomo.texture-upload", qos: .userInitiated)
+    private let textureStateLock = NSLock()
     
     private var currentTexture: MTLTexture?
     private var imageSize: SIMD2<Float> = .init(1920, 1080)
     
     public var currentTurn: Float = 0.0
+    public var closureProgress: Float = 0.0
+    public var motionDirection: Float = 0.0
     public var blurStrength: Float = 0.5
     public var reflectionIntensity: Float = 0.0
     
@@ -61,12 +71,13 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
         self.delegate = self
         self.colorPixelFormat = .bgra8Unorm
         self.clearColor = MTLClearColor(red: 0.003, green: 0.004, blue: 0.005, alpha: 1.0)
-        self.framebufferOnly = false
+        self.framebufferOnly = true
         self.enableSetNeedsDisplay = false
-        self.preferredFramesPerSecond = 120
+        // Lid input is sampled at 60 Hz. Rendering the same state twice at 120 Hz
+        // only doubles the fullscreen fragment workload without adding motion data.
+        self.preferredFramesPerSecond = 60
         self.isPaused = false
         
-        // Sampler
         let samplerDesc = MTLSamplerDescriptor()
         samplerDesc.minFilter = .linear
         samplerDesc.magFilter = .linear
@@ -83,7 +94,6 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
         
         var library: MTLLibrary?
         
-        // Try to load compiled metallib first (check bundle for current class, then main)
         let bundle = Bundle(for: Self.self)
         if let libUrl = bundle.url(forResource: "default", withExtension: "metallib") ?? Bundle.main.url(forResource: "default", withExtension: "metallib") {
             library = try? dev.makeLibrary(URL: libUrl)
@@ -93,12 +103,10 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
             library = dev.makeDefaultLibrary()
         }
         
-        // If still nil, compile from source file directly
         if library == nil {
             let possiblePaths = [
                 Bundle.main.bundlePath + "/Contents/Resources/FoldShaders.metal",
-                Bundle.main.bundlePath + "/FoldShaders.metal",
-                "/Users/ca5/Desktop/iphone-duo-macos-animation/Sources/FoldShaders.metal"
+                Bundle.main.bundlePath + "/FoldShaders.metal"
             ]
             for p in possiblePaths {
                 if let source = try? String(contentsOfFile: p, encoding: .utf8) {
@@ -125,71 +133,81 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
     }
     
     public func updateImage(_ cgImage: CGImage) {
-        guard let dev = self.device else { return }
-        
         let width = cgImage.width
         let height = cgImage.height
-        imageSize = SIMD2<Float>(Float(width), Float(height))
-        
-        let levels = max(1, Int(floor(log2(Double(max(width, height))))))
-        
-        let desc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba8Unorm,
-            width: width,
-            height: height,
-            mipmapped: true
-        )
-        desc.mipmapLevelCount = levels
-        desc.usage = [.shaderRead, .renderTarget]
-        
-        guard let texture = dev.makeTexture(descriptor: desc) else { return }
-        
-        // Render CGImage into level 0
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let bytesPerRow = width * 4
-        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
-        
-        guard let context = CGContext(
-            data: nil,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: bytesPerRow,
-            space: colorSpace,
-            bitmapInfo: bitmapInfo
-        ) else { return }
-        
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-        if let data = context.data {
+        guard width > 0,
+              height > 0,
+              let dev = self.device,
+              let cq = self.commandQueue else { return }
+
+        // A Retina screenshot is tens of megabytes. Convert and upload it away
+        // from the main run loop so lid polling and window presentation do not
+        // stall exactly as the fold begins.
+        textureUploadQueue.async { [weak self] in
+            guard let self else { return }
+
+            let levels = max(1, Int(floor(log2(Double(max(width, height))))) + 1)
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm,
+                width: width,
+                height: height,
+                mipmapped: true
+            )
+            desc.mipmapLevelCount = levels
+            desc.usage = [.shaderRead, .renderTarget]
+
+            guard let texture = dev.makeTexture(descriptor: desc) else { return }
+
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let bytesPerRow = width * 4
+            let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+
+            guard let context = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: bitmapInfo
+            ) else { return }
+
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            guard let data = context.data else { return }
             texture.replace(
                 region: MTLRegionMake2D(0, 0, width, height),
                 mipmapLevel: 0,
                 withBytes: data,
                 bytesPerRow: bytesPerRow
             )
-        }
-        
-        // Generate mipmaps using blit command encoder
-        if let cq = self.commandQueue,
-           let cb = cq.makeCommandBuffer(),
-           let blit = cb.makeBlitCommandEncoder() {
+
+            guard let cb = cq.makeCommandBuffer(),
+                  let blit = cb.makeBlitCommandEncoder() else { return }
             blit.generateMipmaps(for: texture)
             blit.endEncoding()
             cb.commit()
+            cb.waitUntilCompleted()
+
+            guard cb.status == .completed else { return }
+            self.textureStateLock.lock()
+            self.currentTexture = texture
+            self.imageSize = SIMD2<Float>(Float(width), Float(height))
+            self.textureStateLock.unlock()
         }
-        
-        self.currentTexture = texture
     }
-    
-    // MARK: - MTKViewDelegate
     
     public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
     
     public func draw(in view: MTKView) {
+        textureStateLock.lock()
+        let texture = currentTexture
+        let textureImageSize = imageSize
+        textureStateLock.unlock()
+
         guard let drawable = view.currentDrawable,
               let renderPassDesc = view.currentRenderPassDescriptor,
               let pipeline = self.pipelineState,
-              let texture = self.currentTexture,
+              let texture,
               let cq = self.commandQueue,
               let cb = cq.makeCommandBuffer(),
               let encoder = cb.makeRenderCommandEncoder(descriptor: renderPassDesc) else {
@@ -198,7 +216,7 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
         
         let viewSize = view.drawableSize
         let aspect = Float(viewSize.width / max(1.0, viewSize.height))
-        let imgAspect = imageSize.x / max(1.0, imageSize.y)
+        let imgAspect = textureImageSize.x / max(1.0, textureImageSize.y)
         
         let cover = SIMD2<Float>(
             min(1.0, aspect / imgAspect),
@@ -206,10 +224,12 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
         )
         
         var uniforms = Uniforms(
-            imageSize: imageSize,
+            imageSize: textureImageSize,
             cover: cover,
             aspect: aspect,
             turn: currentTurn,
+            closureProgress: closureProgress,
+            motionDirection: motionDirection,
             blurStrength: blurStrength,
             reflectionIntensity: reflectionIntensity
         )

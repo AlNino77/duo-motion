@@ -4,17 +4,27 @@ import AppKit
 public final class OverlayWindowController: NSObject {
     public static let shared = OverlayWindowController()
     
+    private enum MotionDirection: Float {
+        case opening = -1.0
+        case idle = 0.0
+        case closing = 1.0
+    }
+    
     private var window: NSWindow?
     private var metalView: MetalFoldView?
     private var isCapturing = false
-    private var wasZeroTurn = true
+    private var overlayLatched = false
+    private var preArmCapturedThisMotion = false
+    private var lastRawAngle: Double?
+    private var motionDirection: MotionDirection = .idle
     
     public override init() {
         super.init()
         setupWindow()
         setupSleepObservers()
         
-        // Connect intelligent hardware pre-arming
+        // Keep the upstream pre-arm hook as a compatible fallback. This controller also
+        // pre-arms directly from the raw angle so capture can happen before the visual trigger.
         LidSensor.shared.onPreArmCapture = { [weak self] in
             self?.captureScreenAsync()
         }
@@ -39,12 +49,22 @@ public final class OverlayWindowController: NSObject {
     private func handleSleep() {
         metalView?.isPaused = true
         window?.alphaValue = 0.0
-        wasZeroTurn = true
+        overlayLatched = false
+        preArmCapturedThisMotion = false
+        lastRawAngle = nil
+        motionDirection = .idle
         AppSettings.shared.isScreenCaptureDormant = true
     }
     
     private func handleWake() {
-        wasZeroTurn = true
+        // Keep the overlay hidden until the first real angle sample arrives. If the lid
+        // is still inside the effect range, update(turn:angle:) will latch it immediately
+        // and play the opening motion from the physical sensor position.
+        overlayLatched = false
+        preArmCapturedThisMotion = false
+        lastRawAngle = nil
+        motionDirection = .idle
+        
         if let win = self.window, AppSettings.shared.enableLockScreenPriority {
             SkyLightOperator.shared.delegateWindow(win)
         }
@@ -87,7 +107,6 @@ public final class OverlayWindowController: NSObject {
         self.window = win
         self.metalView = mtkView
         
-        // One-time initial image load in background during app launch
         Task {
             if let img = await ScreenCapture.shared.fetchImage() {
                 await MainActor.run {
@@ -102,39 +121,116 @@ public final class OverlayWindowController: NSObject {
     public func update(turn: Double, angle: Double) {
         guard let win = self.window, let mv = self.metalView else { return }
         
-        mv.currentTurn = Float(turn)
-        mv.blurStrength = Float(AppSettings.shared.blurStrength)
-        mv.reflectionIntensity = Float(AppSettings.shared.reflectionIntensity)
+        let settings = AppSettings.shared
+        updateMotionDirection(with: angle)
         
-        // Only trigger when closing and turn > 0
-        if turn > 0.0001 {
-            if wasZeroTurn {
-                wasZeroTurn = false
+        let startAngle = settings.startTiltAngle
+        let endAngle = min(settings.endTiltAngle, startAngle - 16.0)
+        let preferredFullEffectAngle = 60.0
+        let fullEffectAngle = min(startAngle - 8.0, max(endAngle + 8.0, preferredFullEffectAngle))
+        
+        // Pre-arm the screenshot before any overlay is visible. This avoids one-frame
+        // flashes of an old texture when the user closes the lid quickly.
+        let preArmAngle = min(135.0, startAngle + 15.0)
+        if motionDirection == .closing,
+           angle <= preArmAngle,
+           angle > startAngle,
+           !preArmCapturedThisMotion,
+           settings.imageSourceMode == .liveCapture {
+            preArmCapturedThisMotion = true
+            captureScreenAsync()
+        }
+        if motionDirection == .opening && angle >= preArmAngle {
+            preArmCapturedThisMotion = false
+        }
+        
+        let effectProgress: Double
+        let closureProgress: Double
+        
+        if settings.isTestModeActive {
+            effectProgress = min(1.0, max(0.0, turn / 0.58))
+            closureProgress = min(1.0, max(0.0, (turn - 0.58) / 0.42))
+        } else {
+            // turn is already exponentially smoothed by LidSensor. Reconstructing an
+            // effective angle from it gives the shader a stable, low-jitter physical input.
+            let effectiveAngle = startAngle - turn * (startAngle - endAngle)
+            let effectRange = max(1.0, startAngle - fullEffectAngle)
+            let closeRange = max(1.0, fullEffectAngle - endAngle)
+            effectProgress = min(1.0, max(0.0, (startAngle - effectiveAngle) / effectRange))
+            closureProgress = min(1.0, max(0.0, (fullEffectAngle - effectiveAngle) / closeRange))
+        }
+        
+        mv.currentTurn = Float(effectProgress)
+        mv.closureProgress = Float(closureProgress)
+        mv.motionDirection = motionDirection.rawValue
+        mv.blurStrength = Float(settings.blurStrength)
+        mv.reflectionIntensity = Float(settings.reflectionIntensity)
+        
+        let releaseAngle = min(135.0, startAngle + 8.0)
+        let hasVisibleEffect = effectProgress > 0.0001 || closureProgress > 0.0001
+        
+        if hasVisibleEffect {
+            overlayLatched = true
+        }
+        
+        if motionDirection == .opening && angle >= releaseAngle {
+            overlayLatched = false
+        } else if !hasVisibleEffect && angle >= releaseAngle {
+            overlayLatched = false
+        }
+        
+        if overlayLatched {
+            let wasHidden = win.alphaValue < 0.5
+            if wasHidden {
                 win.alphaValue = 1.0
                 win.orderFrontRegardless()
-                if AppSettings.shared.enableLockScreenPriority {
+                if settings.enableLockScreenPriority {
                     SkyLightOperator.shared.delegateWindow(win)
                 }
-                // If pre-arm hasn't finished or was skipped, trigger snapshot if not already active
-                if AppSettings.shared.imageSourceMode == .liveCapture {
+                
+                // Fallback for an exceptionally fast close that jumped over the pre-arm zone.
+                if settings.imageSourceMode == .liveCapture && !preArmCapturedThisMotion {
+                    preArmCapturedThisMotion = true
                     captureScreenAsync()
                 }
             }
             mv.isPaused = false
         } else {
-            if !wasZeroTurn {
-                wasZeroTurn = true
-                win.alphaValue = 0.0
-                mv.isPaused = true
+            win.alphaValue = 0.0
+            mv.isPaused = true
+            mv.currentTurn = 0.0
+            mv.closureProgress = 0.0
+            if angle >= preArmAngle {
+                preArmCapturedThisMotion = false
             }
         }
     }
     
+    private func updateMotionDirection(with angle: Double) {
+        defer { lastRawAngle = angle }
+        guard let previous = lastRawAngle else { return }
+        
+        let delta = angle - previous
+        // Direction is intentionally sticky while the lid is stationary. If the user
+        // pauses midway through an opening, the opening optical curve should not suddenly
+        // snap back to the closing curve just because velocity reached zero.
+        if delta < -0.35 {
+            motionDirection = .closing
+        } else if delta > 0.45 {
+            motionDirection = .opening
+        }
+    }
+    
     public func stopOverlay() {
-        wasZeroTurn = true
+        overlayLatched = false
+        preArmCapturedThisMotion = false
+        lastRawAngle = nil
+        motionDirection = .idle
         window?.alphaValue = 0.0
         metalView?.isPaused = true
         metalView?.currentTurn = 0.0
+        metalView?.closureProgress = 0.0
+        metalView?.motionDirection = MotionDirection.idle.rawValue
     }
     
     public func updateWindowLevel() {

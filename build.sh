@@ -1,87 +1,138 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
+APP_NAME="DuoMo"
+BUNDLE_ID="com.lqsky7.duomo"
 INFO_PLIST="$DIR/Info.plist"
+VERSION_OVERRIDE=""
+BUILD_OVERRIDE=""
+SHOULD_INSTALL=true
 
-echo "=== macTilt macOS Build & Install ==="
+usage() {
+    cat <<USAGE
+Usage: ./build.sh [--version X.Y.Z] [--build N] [--no-install]
 
-# 1. Increment Build Number and Version Number
-if [ -f "$INFO_PLIST" ]; then
-    CURRENT_BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$INFO_PLIST" 2>/dev/null || echo "0")
-    NEW_BUILD=$((CURRENT_BUILD + 1))
-    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEW_BUILD" "$INFO_PLIST"
-    
-    CURRENT_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$INFO_PLIST" 2>/dev/null || echo "1.0.0")
-    # Split version and increment patch number (e.g., 1.0.0 -> 1.0.1)
-    MAJOR=$(echo "$CURRENT_VERSION" | cut -d. -f1)
-    MINOR=$(echo "$CURRENT_VERSION" | cut -d. -f2)
-    PATCH=$(echo "$CURRENT_VERSION" | cut -d. -f3)
-    if [ -z "$PATCH" ]; then PATCH=0; fi
-    NEW_PATCH=$((PATCH + 1))
-    NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
-    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $NEW_VERSION" "$INFO_PLIST"
-    
-    echo "▶ Updated Version: $CURRENT_VERSION -> $NEW_VERSION"
-    echo "▶ Updated Build Number: $CURRENT_BUILD -> $NEW_BUILD"
-else
-    echo "Warning: Info.plist not found!"
-    NEW_VERSION="1.0.0"
-    NEW_BUILD="1"
+  --version X.Y.Z  Set the marketing version in Info.plist.
+  --build N        Set the integer build number in Info.plist.
+  --no-install     Build the app and DMG without installing to /Applications.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --version)
+            [[ $# -ge 2 ]] || { echo "Missing value for --version"; exit 1; }
+            VERSION_OVERRIDE="$2"
+            shift 2
+            ;;
+        --build)
+            [[ $# -ge 2 ]] || { echo "Missing value for --build"; exit 1; }
+            BUILD_OVERRIDE="$2"
+            shift 2
+            ;;
+        --no-install)
+            SHOULD_INSTALL=false
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+[[ -f "$INFO_PLIST" ]] || { echo "Info.plist not found"; exit 1; }
+
+if [[ -n "$VERSION_OVERRIDE" ]]; then
+    [[ "$VERSION_OVERRIDE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+        echo "Version must use semantic versioning, for example 1.0.1"
+        exit 1
+    }
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION_OVERRIDE" "$INFO_PLIST"
 fi
 
-# 2. Prepare Build Directory
+if [[ -n "$BUILD_OVERRIDE" ]]; then
+    [[ "$BUILD_OVERRIDE" =~ ^[0-9]+$ ]] || {
+        echo "Build number must be an integer"
+        exit 1
+    }
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_OVERRIDE" "$INFO_PLIST"
+fi
+
+VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$INFO_PLIST")
+BUILD_NUMBER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$INFO_PLIST")
+
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    echo "Info.plist version must use semantic versioning"
+    exit 1
+}
+[[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]] || {
+    echo "Info.plist build number must be an integer"
+    exit 1
+}
+
+echo "=== $APP_NAME v$VERSION (Build $BUILD_NUMBER) ==="
+
 BUILD_DIR="$DIR/build"
-APP_BUNDLE="$BUILD_DIR/macTilt.app"
+APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_BUNDLE/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
+DMG_OUTPUT="$BUILD_DIR/$APP_NAME-v$VERSION.dmg"
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
-# 3. Compile Metal Shaders
-echo "▶ Compiling Metal Shaders..."
-xcrun -sdk macosx metal -c "$DIR/Sources/FoldShaders.metal" -o "$BUILD_DIR/FoldShaders.air"
-xcrun -sdk macosx metallib "$BUILD_DIR/FoldShaders.air" -o "$RESOURCES_DIR/default.metallib"
+echo "▶ Compiling Metal shaders..."
+METAL_TOOLCHAIN_ID="$(xcodebuild -showComponent MetalToolchain -json 2>/dev/null | /usr/bin/plutil -extract toolchainIdentifier raw -o - - 2>/dev/null || true)"
+METAL_XCRUN=(xcrun)
+if [[ -n "$METAL_TOOLCHAIN_ID" ]]; then
+    METAL_XCRUN+=(-toolchain "$METAL_TOOLCHAIN_ID")
+fi
+"${METAL_XCRUN[@]}" -sdk macosx metal -c "$DIR/Sources/FoldShaders.metal" -o "$BUILD_DIR/FoldShaders.air"
+"${METAL_XCRUN[@]}" -sdk macosx metallib "$BUILD_DIR/FoldShaders.air" -o "$RESOURCES_DIR/default.metallib"
 cp "$DIR/Sources/FoldShaders.metal" "$RESOURCES_DIR/FoldShaders.metal"
 
-# 4. Compile Swift Sources (Universal 2: arm64 + x86_64 targeting macOS 14.0+)
-echo "▶ Compiling Swift Application (Universal: arm64 + x86_64 for macOS 14.0+)..."
+echo "▶ Compiling Swift application for Apple Silicon and Intel..."
+SWIFT_FRAMEWORKS=(
+    -framework AppKit
+    -framework SwiftUI
+    -framework Metal
+    -framework MetalKit
+    -framework ScreenCaptureKit
+    -framework IOKit
+    -framework QuartzCore
+)
+
 swiftc -target arm64-apple-macos14.0 -O \
     "$DIR"/Sources/*.swift \
-    -o "$BUILD_DIR/macTilt_arm64" \
-    -framework AppKit \
-    -framework SwiftUI \
-    -framework Metal \
-    -framework MetalKit \
-    -framework ScreenCaptureKit \
-    -framework IOKit \
-    -framework QuartzCore
+    -o "$BUILD_DIR/${APP_NAME}_arm64" \
+    "${SWIFT_FRAMEWORKS[@]}"
 
 swiftc -target x86_64-apple-macos14.0 -O \
     "$DIR"/Sources/*.swift \
-    -o "$BUILD_DIR/macTilt_x86_64" \
-    -framework AppKit \
-    -framework SwiftUI \
-    -framework Metal \
-    -framework MetalKit \
-    -framework ScreenCaptureKit \
-    -framework IOKit \
-    -framework QuartzCore
+    -o "$BUILD_DIR/${APP_NAME}_x86_64" \
+    "${SWIFT_FRAMEWORKS[@]}"
 
-lipo -create "$BUILD_DIR/macTilt_arm64" "$BUILD_DIR/macTilt_x86_64" -output "$MACOS_DIR/macTilt"
-rm -f "$BUILD_DIR/macTilt_arm64" "$BUILD_DIR/macTilt_x86_64"
+lipo -create \
+    "$BUILD_DIR/${APP_NAME}_arm64" \
+    "$BUILD_DIR/${APP_NAME}_x86_64" \
+    -output "$MACOS_DIR/$APP_NAME"
+rm -f "$BUILD_DIR/${APP_NAME}_arm64" "$BUILD_DIR/${APP_NAME}_x86_64"
 
-# 5. Copy Resources & Plist
 cp "$INFO_PLIST" "$CONTENTS_DIR/Info.plist"
 
-# Generate or copy AppIcon
-if [ ! -f "$DIR/Resources/AppIcon.icns" ] && [ -f "$DIR/Resources/AppIcon.png" ]; then
-    echo "▶ Generating AppIcon.icns from AppIcon.png..."
-    ICONSET="/tmp/AppIcon.iconset"
+if [[ ! -f "$DIR/Resources/AppIcon.icns" && -f "$DIR/Resources/AppIcon.png" ]]; then
+    echo "▶ Generating AppIcon.icns..."
+    ICONSET="/tmp/DuoMo-AppIcon.iconset"
     rm -rf "$ICONSET"
     mkdir -p "$ICONSET"
     sips -z 16 16     "$DIR/Resources/AppIcon.png" --out "$ICONSET/icon_16x16.png" >/dev/null 2>&1
@@ -98,71 +149,55 @@ if [ ! -f "$DIR/Resources/AppIcon.icns" ] && [ -f "$DIR/Resources/AppIcon.png" ]
     rm -rf "$ICONSET"
 fi
 
-if [ -f "$DIR/Resources/AppIcon.icns" ]; then
+if [[ -f "$DIR/Resources/AppIcon.icns" ]]; then
     cp "$DIR/Resources/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
-    /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$CONTENTS_DIR/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$CONTENTS_DIR/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$CONTENTS_DIR/Info.plist" 2>/dev/null || \
+        /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$CONTENTS_DIR/Info.plist"
 fi
 
-if [ -d "$DIR/Resources/Untitled.icon" ]; then
+if [[ -d "$DIR/Resources/Untitled.icon" ]]; then
     cp -R "$DIR/Resources/Untitled.icon" "$RESOURCES_DIR/Untitled.icon"
-elif [ -d "/Users/ca5/Desktop/Untitled.icon" ]; then
-    cp -R "/Users/ca5/Desktop/Untitled.icon" "$RESOURCES_DIR/Untitled.icon"
 fi
 
-if [ -f "$DIR/Resources/default.png" ]; then
-    cp "$DIR/Resources/default.png" "$RESOURCES_DIR/default.png"
-fi
-if [ -f "$DIR/Resources/AppIcon.png" ]; then
-    cp "$DIR/Resources/AppIcon.png" "$RESOURCES_DIR/AppIcon.png"
-fi
-if [ -f "$DIR/Resources/AppIcon.svg" ]; then
-    cp "$DIR/Resources/AppIcon.svg" "$RESOURCES_DIR/AppIcon.svg"
-fi
+for resource in default.png AppIcon.png AppIcon.svg; do
+    if [[ -f "$DIR/Resources/$resource" ]]; then
+        cp "$DIR/Resources/$resource" "$RESOURCES_DIR/$resource"
+    fi
+done
 
-# 6. Codesign App Bundle
-echo "▶ Codesigning Application Bundle..."
-SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep "Apple Development" | head -n 1 | awk -F '"' '{print $2}')
-if [ -z "$SIGNING_IDENTITY" ]; then
+echo "▶ Codesigning application bundle..."
+SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | grep "Apple Development" | head -n 1 | awk -F '"' '{print $2}' || true)
+if [[ -z "$SIGNING_IDENTITY" ]]; then
     SIGNING_IDENTITY="-"
 fi
-echo "▶ Using Signing Identity: $SIGNING_IDENTITY"
+echo "▶ Using signing identity: $SIGNING_IDENTITY"
 codesign --force --deep --sign "$SIGNING_IDENTITY" "$APP_BUNDLE"
 
-# 7. Create Disk Image (DMG) Installer
-DMG_OUTPUT="$BUILD_DIR/macTilt.dmg"
-echo "▶ Creating Disk Image ($DMG_OUTPUT)..."
-DMG_STAGING="/tmp/mactilt_dmg_staging"
+echo "▶ Creating disk image..."
+DMG_STAGING="/tmp/DuoMo-dmg-staging"
 rm -rf "$DMG_STAGING" "$DMG_OUTPUT"
 mkdir -p "$DMG_STAGING"
-cp -R "$APP_BUNDLE" "$DMG_STAGING/macTilt.app"
+cp -R "$APP_BUNDLE" "$DMG_STAGING/$APP_NAME.app"
 ln -s /Applications "$DMG_STAGING/Applications"
-hdiutil create -volname "macTilt" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG_OUTPUT" >/dev/null 2>&1
+hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG_OUTPUT" >/dev/null 2>&1
 rm -rf "$DMG_STAGING"
-if [ "$SIGNING_IDENTITY" != "-" ]; then
+if [[ "$SIGNING_IDENTITY" != "-" ]]; then
     codesign --force --sign "$SIGNING_IDENTITY" "$DMG_OUTPUT" >/dev/null 2>&1
 fi
-echo "✔ DMG created and signed: $DMG_OUTPUT"
 
-# 8. Install to /Applications
-INSTALL_TARGET="/Applications/macTilt.app"
-echo "▶ Installing to $INSTALL_TARGET..."
-
-# Kill running instance if exists
-pkill -x "macTilt" || true
-pkill -x "iPhoneDuo" || true
-sleep 0.5
-
-# Remove old installation if exists
-if [ -d "$INSTALL_TARGET" ]; then
-    rm -rf "$INSTALL_TARGET"
-fi
-if [ -d "/Applications/iPhoneDuo.app" ]; then
-    rm -rf "/Applications/iPhoneDuo.app"
+if [[ "$SHOULD_INSTALL" == true ]]; then
+    INSTALL_TARGET="/Applications/$APP_NAME.app"
+    LEGACY_TARGET="/Applications/macTilt.app"
+    echo "▶ Installing to $INSTALL_TARGET..."
+    pkill -x "$APP_NAME" || true
+    pkill -x "macTilt" || true
+    sleep 0.5
+    [[ ! -d "$INSTALL_TARGET" ]] || rm -rf "$INSTALL_TARGET"
+    [[ ! -d "$LEGACY_TARGET" ]] || rm -rf "$LEGACY_TARGET"
+    cp -R "$APP_BUNDLE" "$INSTALL_TARGET"
+    echo "✔ Installed: $INSTALL_TARGET"
 fi
 
-cp -R "$APP_BUNDLE" "$INSTALL_TARGET"
-
-echo "=================================================="
-echo "✔ Successfully installed macTilt v${NEW_VERSION} (Build ${NEW_BUILD})"
-echo "✔ Location: $INSTALL_TARGET"
-echo "=================================================="
+echo "✔ App: $APP_BUNDLE"
+echo "✔ DMG: $DMG_OUTPUT"
+echo "✔ Bundle ID: $BUNDLE_ID"
