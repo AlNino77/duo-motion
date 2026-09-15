@@ -20,6 +20,20 @@ public final class OverlayWindowController: NSObject {
     private var lastPermissionProbe: TimeInterval = 0
     private var suppressForClamshell = false
     private var displayReconfigurationObserver: NSObjectProtocol?
+    private var stillSince: TimeInterval = 0
+    private var stillLow: Double = 0
+    private var stillHigh: Double = 0
+    private var isReleasing = false
+    private var isReleased = false
+    private var releaseStartTime: TimeInterval = 0
+    private var releaseFromTurn: Double = 0
+    private var releasedAtTarget: Double = 0
+    private var releasedFloor: Double = 0
+    private var reengageStartTime: TimeInterval = 0
+    private static let motionBand = 0.03
+    private static let autoReleaseDelay: TimeInterval = 1.0
+    private static let releaseDuration: TimeInterval = 0.45
+    private static let reengageDuration: TimeInterval = 0.18
     
     public override init() {
         super.init()
@@ -111,6 +125,7 @@ public final class OverlayWindowController: NSObject {
     
     private func handleSleep() {
         hideOverlay()
+        resetAutoRelease()
         overlayLatched = false
         preArmCapturedThisMotion = false
         lastRawAngle = nil
@@ -126,6 +141,7 @@ public final class OverlayWindowController: NSObject {
         preArmCapturedThisMotion = false
         lastRawAngle = nil
         motionDirection = .idle
+        resetAutoRelease()
         refreshSuppression()
         guard !suppressForClamshell else {
             hideOverlay()
@@ -185,6 +201,100 @@ public final class OverlayWindowController: NSObject {
             }
         }
     }
+
+    private func resetAutoRelease() {
+        stillSince = 0
+        stillLow = 0
+        stillHigh = 0
+        isReleasing = false
+        isReleased = false
+        releaseStartTime = 0
+        releaseFromTurn = 0
+        releasedAtTarget = 0
+        releasedFloor = 0
+        reengageStartTime = 0
+    }
+
+    private func resolveAutoRelease(
+        sensorTurn: Double,
+        sensorTarget: Double,
+        angle: Double
+    ) -> Double {
+        let now = ProcessInfo.processInfo.systemUptime
+        let settings = AppSettings.shared
+
+        if sensorTarget <= 0.0005 {
+            resetAutoRelease()
+            return sensorTurn
+        }
+
+        if isReleasing {
+            if abs(sensorTarget - releasedAtTarget) > Self.motionBand {
+                isReleasing = false
+                stillSince = 0
+                stillLow = sensorTarget
+                stillHigh = sensorTarget
+                return sensorTurn
+            }
+            let t = min(1.0, (now - releaseStartTime) / Self.releaseDuration)
+            let eased = 1.0 - pow(1.0 - t, 3.0)
+            let value = releaseFromTurn * (1.0 - eased)
+            if t >= 1.0 {
+                isReleasing = false
+                isReleased = true
+                releasedFloor = sensorTarget
+                stillSince = 0
+                return 0
+            }
+            return value
+        }
+
+        if isReleased {
+            if sensorTarget < releasedFloor - Self.motionBand {
+                releasedFloor = sensorTarget
+            }
+            guard sensorTarget > releasedFloor + Self.motionBand else { return 0 }
+            isReleased = false
+            reengageStartTime = now
+            stillSince = 0
+            stillLow = sensorTarget
+            stillHigh = sensorTarget
+        }
+
+        guard settings.isHardwareSensor,
+              !settings.isTestModeActive,
+              angle > settings.endTiltAngle + 5.0 else {
+            stillSince = 0
+            stillLow = sensorTarget
+            stillHigh = sensorTarget
+            return sensorTurn
+        }
+
+        if sensorTarget < stillLow { stillLow = sensorTarget }
+        if sensorTarget > stillHigh { stillHigh = sensorTarget }
+        if stillHigh - stillLow > Self.motionBand {
+            stillLow = sensorTarget
+            stillHigh = sensorTarget
+            stillSince = now
+        } else if stillSince == 0 {
+            stillSince = now
+        }
+
+        if stillSince > 0, now - stillSince >= Self.autoReleaseDelay {
+            isReleasing = true
+            releaseStartTime = now
+            releaseFromTurn = sensorTurn
+            releasedAtTarget = sensorTarget
+        }
+
+        if reengageStartTime > 0 {
+            let t = min(1.0, (now - reengageStartTime) / Self.reengageDuration)
+            if t >= 1.0 { reengageStartTime = 0 }
+            let eased = 1.0 - pow(1.0 - t, 3.0)
+            return sensorTurn * eased
+        }
+        return sensorTurn
+    }
     
     public func update(turn: Double, angle: Double) {
         guard let win = self.window, let mv = self.metalView else { return }
@@ -202,6 +312,11 @@ public final class OverlayWindowController: NSObject {
             return
         }
         updateMotionDirection(with: angle)
+        let resolvedTurn = resolveAutoRelease(
+            sensorTurn: turn,
+            sensorTarget: settings.normalizedTurn(for: angle),
+            angle: angle
+        )
         
         let startAngle = settings.startTiltAngle
         let endAngle = min(settings.endTiltAngle, startAngle - 16.0)
@@ -227,12 +342,12 @@ public final class OverlayWindowController: NSObject {
         let closureProgress: Double
         
         if settings.isTestModeActive {
-            effectProgress = min(1.0, max(0.0, turn / 0.58))
-            closureProgress = min(1.0, max(0.0, (turn - 0.58) / 0.42))
+            effectProgress = min(1.0, max(0.0, resolvedTurn / 0.58))
+            closureProgress = min(1.0, max(0.0, (resolvedTurn - 0.58) / 0.42))
         } else {
             // turn is already exponentially smoothed by LidSensor. Reconstructing an
             // effective angle from it gives the shader a stable, low-jitter physical input.
-            let effectiveAngle = startAngle - turn * (startAngle - endAngle)
+            let effectiveAngle = startAngle - resolvedTurn * (startAngle - endAngle)
             let effectRange = max(1.0, startAngle - fullEffectAngle)
             let closeRange = max(1.0, fullEffectAngle - endAngle)
             effectProgress = min(1.0, max(0.0, (startAngle - effectiveAngle) / effectRange))
@@ -250,6 +365,9 @@ public final class OverlayWindowController: NSObject {
         
         if hasVisibleEffect {
             overlayLatched = true
+        }
+        if isReleased && resolvedTurn <= 0.0005 {
+            overlayLatched = false
         }
         
         if motionDirection == .opening && angle >= releaseAngle {
@@ -301,6 +419,7 @@ public final class OverlayWindowController: NSObject {
     }
     
     public func stopOverlay() {
+        resetAutoRelease()
         overlayLatched = false
         preArmCapturedThisMotion = false
         lastRawAngle = nil
