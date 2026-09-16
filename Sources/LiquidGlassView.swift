@@ -8,6 +8,8 @@ public struct LiquidGlassControlPanel: View {
     @State private var startFoldDraft: Double
     @State private var pendingStartFoldAngle: Double?
     @State private var showingStartFoldWarning = false
+    @State private var showingLaunchAtStartupError = false
+    @State private var launchAtStartupErrorMessage = ""
 
     private let panelHeight: CGFloat
 
@@ -36,19 +38,20 @@ public struct LiquidGlassControlPanel: View {
         .onAppear {
             startFoldDraft = settings.startTiltAngle
             settings.refreshPermissions()
+            settings.refreshLaunchAtStartupStatus()
         }
         .onDisappear {
             settings.isTestModeActive = false
             settings.testTurnValue = 0
             OverlayWindowController.shared.stopOverlay()
         }
-        .alert("Settings may become unavailable", isPresented: $showingStartFoldWarning) {
-            Button(keepCurrentStartFoldLabel, role: .cancel) {
+        .alert("Hide settings?", isPresented: $showingStartFoldWarning) {
+            Button("Cancel", role: .cancel) {
                 startFoldDraft = settings.startTiltAngle
                 pendingStartFoldAngle = nil
             }
 
-            Button(usePendingStartFoldLabel) {
+            Button(confirmStartFoldLabel) {
                 if let pendingStartFoldAngle {
                     settings.startTiltAngle = pendingStartFoldAngle
                     startFoldDraft = pendingStartFoldAngle
@@ -165,6 +168,35 @@ public struct LiquidGlassControlPanel: View {
                     Toggle("", isOn: $settings.enableLockScreenPriority)
                         .labelsHidden()
                 }
+
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Launch at Startup")
+                            .font(.subheadline.weight(.medium))
+                        Text(settings.launchAtStartupNeedsApproval
+                             ? "Approval required in Login Items."
+                             : "Open DuoMo automatically when you sign in.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    if settings.launchAtStartupNeedsApproval {
+                        Button("Review…") {
+                            settings.openLoginItemsSettings()
+                        }
+                        .buttonStyle(.borderless)
+                    }
+
+                    Toggle("", isOn: launchAtStartupBinding)
+                        .labelsHidden()
+                        .alert("Startup change failed", isPresented: $showingLaunchAtStartupError) {
+                            Button("OK", role: .cancel) {}
+                        } message: {
+                            Text(launchAtStartupErrorMessage)
+                        }
+                }
             }
         }
         .formStyle(.grouped)
@@ -175,18 +207,25 @@ public struct LiquidGlassControlPanel: View {
         return "v\(version ?? "1.0.0")"
     }
 
-    private var keepCurrentStartFoldLabel: String {
-        "Keep \(Int(settings.startTiltAngle.rounded()))\u{00B0}"
+    private var confirmStartFoldLabel: String {
+        "Set \(Int((pendingStartFoldAngle ?? startFoldDraft).rounded()))\u{00B0}"
     }
 
-    private var usePendingStartFoldLabel: String {
-        "Use \(Int((pendingStartFoldAngle ?? startFoldDraft).rounded()))\u{00B0}"
+    private var launchAtStartupBinding: Binding<Bool> {
+        Binding(
+            get: { settings.launchAtStartupEnabled },
+            set: { enabled in
+                if let errorMessage = settings.setLaunchAtStartupEnabled(enabled) {
+                    launchAtStartupErrorMessage = errorMessage
+                    showingLaunchAtStartupError = true
+                }
+            }
+        )
     }
 
     private var startFoldWarningMessage: String {
-        let currentAngle = Int(settings.currentLidAngle.rounded())
         let proposedAngle = Int((pendingStartFoldAngle ?? startFoldDraft).rounded())
-        return "Your Mac is currently open to \(currentAngle)\u{00B0}. Setting Start Fold to \(proposedAngle)\u{00B0} will activate the fold effect now. The settings panel may remain hidden until you open the display beyond \(proposedAngle)\u{00B0}."
+        return "Open past \(proposedAngle)\u{00B0} to access settings again."
     }
 
     private func handleStartFoldEditing(_ isEditing: Bool) {

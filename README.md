@@ -14,21 +14,21 @@ Rather than rendering inside a separate window, **the entire macOS display follo
 
 ## Features
 
-- 📐 **Physical Lid Angle Sensing**: Real-time 60 Hz polling of Apple's internal lid angle sensor (`IOHIDDevice` Vendor `0x05AC`, Product `0x8104`, UsagePage `0x0020`, Usage `0x008A`).
-- 🌊 **Exact 1:1 Shaders**: Native Metal Shading Language implementation:
+- **Physical Lid Angle Sensing**: Real-time 60 Hz polling of Apple's internal lid angle sensor (`IOHIDDevice` Vendor `0x05AC`, Product `0x8104`, UsagePage `0x0020`, Usage `0x008A`).
+- **Exact 1:1 Shaders**: Native Metal Shading Language implementation:
   - 3D perspective projection with up-to-down clamshell hinge bend
   - 5-tap separable Gaussian blur mip chain
   - Glass tint and specular rim reflections
   - Dark void horizon falloff
-- 🖥️ **Full-Screen Seamless Overlay**: Spans the entire screen at `.screenSaver` level. Completely click-through and invisible when open, freezing and folding into 3D space on tilt.
-- 🎛️ **Native Settings Panel**: A compact SwiftUI panel using a 2×2 status layout and grouped settings:
+- **Full-Screen Seamless Overlay**: Spans the entire screen at `.screenSaver` level. Completely click-through and invisible when open, freezing and folding into 3D space on tilt.
+- **Native Settings Panel**: A compact SwiftUI panel using a 2×2 status layout and grouped settings:
   - **Liquid Glass Status Tiles**: Status, Screen Recording permission, Energy, and live lid angle use native Liquid Glass on macOS 26. Secondary details appear only as hover help.
   - **Angle**: Configure Start Fold and Full Fold. If a new Start Fold value would activate at the current lid position, DuoMo asks for confirmation before saving it.
   - **Motion**: Tune follow response, blur, and glass reflection.
-  - **Advanced**: Control wake-transition priority.
+  - **Advanced**: Control wake-transition priority and launch DuoMo automatically when you sign in.
   - **Live Capture Only**: The fold always uses the current display without a separate source selector.
-- 🍸 **Menu Bar Extra**: Sensor status, settings, screen recapture, and quit actions without a numerical angle readout.
-- 🚀 **Controlled Releases (`build.sh`)**: Builds the current version without silently changing it, and supports explicit semantic version and build-number updates.
+- **Menu Bar Extra**: Sensor status, settings, screen recapture, and quit actions without a numerical angle readout.
+- **Controlled Releases (`build.sh`)**: Builds the current version without silently changing it, and supports explicit semantic version and build-number updates.
 
 ---
 
@@ -51,7 +51,7 @@ Build and install the current version from `Info.plist`:
 Create a release with an explicit version and build number:
 
 ```bash
-./build.sh --version 1.0.1 --build 2
+./build.sh --version 1.1.0 --build 2
 ```
 
 Build without installing:

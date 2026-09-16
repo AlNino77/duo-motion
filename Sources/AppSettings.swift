@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import SwiftUI
+import ServiceManagement
 
 public enum ImageSourceMode: Int, CaseIterable, Identifiable {
     case liveCapture = 0
@@ -75,6 +76,9 @@ public final class AppSettings: ObservableObject {
             OverlayWindowController.shared.updateWindowLevel()
         }
     }
+
+    @Published public private(set) var launchAtStartupEnabled: Bool = false
+    @Published public private(set) var launchAtStartupNeedsApproval: Bool = false
     
     // MARK: - Real-time State
     @Published public var isTestModeActive: Bool = false {
@@ -142,9 +146,11 @@ public final class AppSettings: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             self?.refreshPermissions()
+            self?.refreshLaunchAtStartupStatus()
         }
         
         refreshPermissions()
+        refreshLaunchAtStartupStatus()
     }
     
     public func refreshPermissions() {
@@ -159,6 +165,67 @@ public final class AppSettings: ObservableObject {
                 self.hasScreenRecordingPermission = verified
             }
         }
+    }
+
+    public func refreshLaunchAtStartupStatus() {
+        switch SMAppService.mainApp.status {
+        case .enabled:
+            launchAtStartupEnabled = true
+            launchAtStartupNeedsApproval = false
+        case .requiresApproval:
+            launchAtStartupEnabled = false
+            launchAtStartupNeedsApproval = true
+        case .notRegistered, .notFound:
+            launchAtStartupEnabled = false
+            launchAtStartupNeedsApproval = false
+        @unknown default:
+            launchAtStartupEnabled = false
+            launchAtStartupNeedsApproval = false
+        }
+    }
+
+    @discardableResult
+    public func setLaunchAtStartupEnabled(_ enabled: Bool) -> String? {
+        let service = SMAppService.mainApp
+
+        do {
+            if enabled {
+                switch service.status {
+                case .enabled:
+                    break
+                case .requiresApproval:
+                    refreshLaunchAtStartupStatus()
+                    SMAppService.openSystemSettingsLoginItems()
+                    return nil
+                case .notRegistered, .notFound:
+                    try service.register()
+                @unknown default:
+                    try service.register()
+                }
+            } else {
+                switch service.status {
+                case .notRegistered, .notFound:
+                    break
+                case .enabled, .requiresApproval:
+                    try service.unregister()
+                @unknown default:
+                    try service.unregister()
+                }
+            }
+        } catch {
+            refreshLaunchAtStartupStatus()
+            return error.localizedDescription
+        }
+
+        refreshLaunchAtStartupStatus()
+        if enabled && launchAtStartupNeedsApproval {
+            SMAppService.openSystemSettingsLoginItems()
+        }
+        return nil
+    }
+
+    public func openLoginItemsSettings() {
+        SMAppService.openSystemSettingsLoginItems()
     }
     
     /// Calculate normalized turn (0.0 to 1.0) across the entire physical closing range.
