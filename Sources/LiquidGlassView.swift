@@ -42,13 +42,13 @@ public struct LiquidGlassControlPanel: View {
             settings.testTurnValue = 0
             OverlayWindowController.shared.stopOverlay()
         }
-        .alert("Settings may become unavailable", isPresented: $showingStartFoldWarning) {
-            Button(keepCurrentStartFoldLabel, role: .cancel) {
+        .alert("Hide settings?", isPresented: $showingStartFoldWarning) {
+            Button("Cancel", role: .cancel) {
                 startFoldDraft = settings.startTiltAngle
                 pendingStartFoldAngle = nil
             }
 
-            Button(usePendingStartFoldLabel) {
+            Button(confirmStartFoldLabel) {
                 if let pendingStartFoldAngle {
                     settings.startTiltAngle = pendingStartFoldAngle
                     startFoldDraft = pendingStartFoldAngle
@@ -175,18 +175,13 @@ public struct LiquidGlassControlPanel: View {
         return "v\(version ?? "1.0.0")"
     }
 
-    private var keepCurrentStartFoldLabel: String {
-        "Keep \(Int(settings.startTiltAngle.rounded()))\u{00B0}"
-    }
-
-    private var usePendingStartFoldLabel: String {
-        "Use \(Int((pendingStartFoldAngle ?? startFoldDraft).rounded()))\u{00B0}"
+    private var confirmStartFoldLabel: String {
+        "Set \(Int((pendingStartFoldAngle ?? startFoldDraft).rounded()))\u{00B0}"
     }
 
     private var startFoldWarningMessage: String {
-        let currentAngle = Int(settings.currentLidAngle.rounded())
         let proposedAngle = Int((pendingStartFoldAngle ?? startFoldDraft).rounded())
-        return "Your Mac is currently open to \(currentAngle)\u{00B0}. Setting Start Fold to \(proposedAngle)\u{00B0} will activate the fold effect now. The settings panel may remain hidden until you open the display beyond \(proposedAngle)\u{00B0}."
+        return "Open past \(proposedAngle)\u{00B0} to access settings again."
     }
 
     private func handleStartFoldEditing(_ isEditing: Bool) {
