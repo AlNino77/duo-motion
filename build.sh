@@ -112,6 +112,7 @@ SWIFT_FRAMEWORKS=(
     -framework ScreenCaptureKit
     -framework IOKit
     -framework QuartzCore
+    -framework ServiceManagement
 )
 
 swiftc -target arm64-apple-macos14.0 -O \

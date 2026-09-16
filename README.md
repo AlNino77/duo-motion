@@ -25,7 +25,7 @@ Rather than rendering inside a separate window, **the entire macOS display follo
   - **Liquid Glass Status Tiles**: Status, Screen Recording permission, Energy, and live lid angle use native Liquid Glass on macOS 26. Secondary details appear only as hover help.
   - **Angle**: Configure Start Fold and Full Fold. If a new Start Fold value would activate at the current lid position, DuoMo asks for confirmation before saving it.
   - **Motion**: Tune follow response, blur, and glass reflection.
-  - **Advanced**: Control wake-transition priority.
+  - **Advanced**: Control wake-transition priority and launch DuoMo automatically when you sign in.
   - **Live Capture Only**: The fold always uses the current display without a separate source selector.
 - **Menu Bar Extra**: Sensor status, settings, screen recapture, and quit actions without a numerical angle readout.
 - **Controlled Releases (`build.sh`)**: Builds the current version without silently changing it, and supports explicit semantic version and build-number updates.

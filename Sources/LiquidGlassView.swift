@@ -8,6 +8,8 @@ public struct LiquidGlassControlPanel: View {
     @State private var startFoldDraft: Double
     @State private var pendingStartFoldAngle: Double?
     @State private var showingStartFoldWarning = false
+    @State private var showingLaunchAtStartupError = false
+    @State private var launchAtStartupErrorMessage = ""
 
     private let panelHeight: CGFloat
 
@@ -36,6 +38,7 @@ public struct LiquidGlassControlPanel: View {
         .onAppear {
             startFoldDraft = settings.startTiltAngle
             settings.refreshPermissions()
+            settings.refreshLaunchAtStartupStatus()
         }
         .onDisappear {
             settings.isTestModeActive = false
@@ -165,6 +168,35 @@ public struct LiquidGlassControlPanel: View {
                     Toggle("", isOn: $settings.enableLockScreenPriority)
                         .labelsHidden()
                 }
+
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Launch at Startup")
+                            .font(.subheadline.weight(.medium))
+                        Text(settings.launchAtStartupNeedsApproval
+                             ? "Approval required in Login Items."
+                             : "Open DuoMo automatically when you sign in.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    if settings.launchAtStartupNeedsApproval {
+                        Button("Review…") {
+                            settings.openLoginItemsSettings()
+                        }
+                        .buttonStyle(.borderless)
+                    }
+
+                    Toggle("", isOn: launchAtStartupBinding)
+                        .labelsHidden()
+                        .alert("Startup change failed", isPresented: $showingLaunchAtStartupError) {
+                            Button("OK", role: .cancel) {}
+                        } message: {
+                            Text(launchAtStartupErrorMessage)
+                        }
+                }
             }
         }
         .formStyle(.grouped)
@@ -177,6 +209,18 @@ public struct LiquidGlassControlPanel: View {
 
     private var confirmStartFoldLabel: String {
         "Set \(Int((pendingStartFoldAngle ?? startFoldDraft).rounded()))\u{00B0}"
+    }
+
+    private var launchAtStartupBinding: Binding<Bool> {
+        Binding(
+            get: { settings.launchAtStartupEnabled },
+            set: { enabled in
+                if let errorMessage = settings.setLaunchAtStartupEnabled(enabled) {
+                    launchAtStartupErrorMessage = errorMessage
+                    showingLaunchAtStartupError = true
+                }
+            }
+        )
     }
 
     private var startFoldWarningMessage: String {
