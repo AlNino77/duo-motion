@@ -158,11 +158,7 @@ if [[ -f "$DIR/Resources/AppIcon.icns" ]]; then
         /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$CONTENTS_DIR/Info.plist"
 fi
 
-if [[ -d "$DIR/Resources/Untitled.icon" ]]; then
-    cp -R "$DIR/Resources/Untitled.icon" "$RESOURCES_DIR/Untitled.icon"
-fi
-
-for resource in default.png AppIcon.png AppIcon.svg; do
+for resource in default.png; do
     if [[ -f "$DIR/Resources/$resource" ]]; then
         cp "$DIR/Resources/$resource" "$RESOURCES_DIR/$resource"
     fi
