@@ -51,7 +51,7 @@ Build and install the current version from `Info.plist`:
 Create a release with an explicit version and build number:
 
 ```bash
-./build.sh --version 1.1.0 --build 2
+./build.sh --version 1.2.0 --build 3
 ```
 
 Build without installing:
