@@ -48,6 +48,19 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
     public var motionDirection: Float = 0.0
     public var blurStrength: Float = 0.5
     public var reflectionIntensity: Float = 0.0
+
+    public func resumeRendering() {
+        let panelMax = (DisplayTopology.builtInScreen() ?? NSScreen.main)?.maximumFramesPerSecond ?? 60
+        preferredFramesPerSecond = min(120, max(30, panelMax))
+        if isPaused {
+            isPaused = false
+        }
+    }
+
+    public func suspendRendering() {
+        isPaused = true
+        releaseDrawables()
+    }
     
     public init(frame: CGRect) {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -74,10 +87,8 @@ public final class MetalFoldView: MTKView, MTKViewDelegate {
         self.clearColor = MTLClearColor(red: 0.003, green: 0.004, blue: 0.005, alpha: 1.0)
         self.framebufferOnly = true
         self.enableSetNeedsDisplay = false
-        // Lid input is sampled at 60 Hz. Rendering the same state twice at 120 Hz
-        // only doubles the fullscreen fragment workload without adding motion data.
-        self.preferredFramesPerSecond = 60
-        self.isPaused = false
+        self.preferredFramesPerSecond = 120
+        self.isPaused = true
         
         let samplerDesc = MTLSamplerDescriptor()
         samplerDesc.minFilter = .linear

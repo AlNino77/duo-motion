@@ -112,7 +112,7 @@ public final class OverlayWindowController: NSObject {
         }
         window?.alphaValue = 0.0
         window?.orderOut(nil)
-        metalView?.isPaused = true
+        metalView?.suspendRendering()
         if stopCaptureStream {
             AppSettings.shared.isScreenCaptureDormant = true
         }
@@ -193,7 +193,7 @@ public final class OverlayWindowController: NSObject {
         
         let mtkView = MetalFoldView(frame: win.contentView?.bounds ?? screen.frame)
         mtkView.autoresizingMask = [.width, .height]
-        mtkView.isPaused = true
+        mtkView.suspendRendering()
         win.contentView = mtkView
         
         self.window = win
@@ -317,7 +317,7 @@ public final class OverlayWindowController: NSObject {
                     captureScreenAsync()
                 }
             }
-            mv.isPaused = false
+            mv.resumeRendering()
         } else {
             let keepStreamWarm = !win.isVisible
                 && settings.imageSourceMode == .liveCapture
