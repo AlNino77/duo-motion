@@ -23,6 +23,9 @@ public final class LidSensor {
     private var latestSampleTime: CFTimeInterval = 0
     private var latestReadSucceeded = false
     private var timer: Timer?
+    private var currentPollInterval: Double = 1.0 / 60.0
+    private var pendingPollInterval: Double = 1.0 / 60.0
+    private var pendingPollTicks: Int = 0
     private var workspaceObserverTokens: [NSObjectProtocol] = []
     
     private static let noOptions = IOOptionBits(kIOHIDOptionsTypeNone)
@@ -42,7 +45,7 @@ public final class LidSensor {
     private var hasPreArmedInThisMotion: Bool = false
     private var lastPreArmTime: CFTimeInterval = 0
     private var lastUIStatePublishTime: CFTimeInterval = 0
-    private var stationaryFrames: Int = 0
+    private var stationarySince: CFTimeInterval?
     
     // Clamshell mode animation state (MacBook Neo, M1, etc.)
     private var isSimulating: Bool = false
@@ -84,10 +87,11 @@ public final class LidSensor {
     public func handleWake() {
         if AppSettings.shared.isHardwareSensor {
             resetPredictor(to: currentRawAngle)
+            let pollInterval = currentPollInterval
             hidQueue.async { [weak self] in
                 guard let self else { return }
                 self.stopHIDPollingOnQueue(closeDevice: true)
-                self.startHIDPollingOnQueue()
+                self.startHIDPollingOnQueue(interval: pollInterval)
             }
         } else {
             // Clamshell mode: on wake / opening from sleep, animate unfold
@@ -272,21 +276,90 @@ public final class LidSensor {
     
     // The feature-report call can occasionally block while the Mac wakes.
     // Keep it away from the main run loop and publish only a small snapshot.
-    private func startHIDPollingOnQueue() {
+    private func startHIDPollingOnQueue(interval: Double) {
         guard hidTimer == nil else { return }
         _ = openHIDDeviceIfNeeded(force: true)
 
         let source = DispatchSource.makeTimerSource(queue: hidQueue)
+        let nanoseconds = max(1, Int(interval * 1_000_000_000.0))
+        let leeway: DispatchTimeInterval = interval <= (1.0 / 120.0 + 0.0001)
+            ? .nanoseconds(0)
+            : .milliseconds(max(1, Int(interval * 150.0)))
         source.schedule(
             deadline: .now(),
-            repeating: .nanoseconds(16_666_667),
-            leeway: .milliseconds(2)
+            repeating: .nanoseconds(nanoseconds),
+            leeway: leeway
         )
         source.setEventHandler { [weak self] in
             self?.pollHIDOnce()
         }
         hidTimer = source
         source.resume()
+    }
+
+    private func rescheduleHIDPolling(interval: Double) {
+        hidQueue.async { [weak self] in
+            guard let self else { return }
+            self.hidTimer?.setEventHandler {}
+            self.hidTimer?.cancel()
+            self.hidTimer = nil
+            self.startHIDPollingOnQueue(interval: interval)
+        }
+    }
+
+    private func scheduleEaseTimer(interval: Double) {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        timer?.tolerance = interval <= (1.0 / 60.0 + 0.0001) ? 0 : interval * 0.2
+        if let timer {
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+
+    private func applyPollInterval(_ interval: Double) {
+        guard abs(interval - currentPollInterval) > 0.0001 else { return }
+        currentPollInterval = interval
+        scheduleEaseTimer(interval: interval)
+        if AppSettings.shared.isHardwareSensor {
+            rescheduleHIDPolling(interval: interval)
+        }
+    }
+
+    private func kickHighRateIfNeeded() {
+        let fast = 1.0 / 120.0
+        pendingPollInterval = fast
+        pendingPollTicks = 0
+        applyPollInterval(fast)
+    }
+
+    private func adaptPollInterval(angle: Double) {
+        let settings = AppSettings.shared
+        let isMoving = abs(smoothedAngularVelocity) > 12.0
+        let desired: Double
+
+        if isMoving || isActivelyClosing || isSimulating || settings.isTestModeActive {
+            desired = 1.0 / 120.0
+        } else if !settings.isScreenCaptureDormant
+                    || angle <= min(135.0, settings.startTiltAngle + 15.0)
+                    || displayTurn > 0.001 {
+            desired = 1.0 / 60.0
+        } else {
+            desired = 1.0 / 10.0
+        }
+
+        if abs(desired - pendingPollInterval) > 0.0001 {
+            pendingPollInterval = desired
+            pendingPollTicks = 0
+            return
+        }
+
+        pendingPollTicks += 1
+        if pendingPollTicks >= 2 {
+            pendingPollTicks = 0
+            applyPollInterval(desired)
+        }
     }
 
     private func stopHIDPollingOnQueue(closeDevice: Bool) {
@@ -406,17 +479,18 @@ public final class LidSensor {
 
     public func start() {
         guard timer == nil else { return }
+        currentPollInterval = 1.0 / 60.0
+        pendingPollInterval = currentPollInterval
+        pendingPollTicks = 0
         
         if AppSettings.shared.isHardwareSensor {
+            let pollInterval = currentPollInterval
             hidQueue.async { [weak self] in
-                self?.startHIDPollingOnQueue()
+                self?.startHIDPollingOnQueue(interval: pollInterval)
             }
         }
         
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            self?.tick()
-        }
-        RunLoop.main.add(timer!, forMode: .common)
+        scheduleEaseTimer(interval: currentPollInterval)
     }
     
     public func stop() {
@@ -443,25 +517,35 @@ public final class LidSensor {
                     let instantVelocity = (angle - previousRawAngle) / sampleInterval
                     smoothedAngularVelocity = smoothedAngularVelocity * 0.65 + instantVelocity * 0.35
                     updatePredictor(measured: angle, sampleTime: sample.time)
+                    if abs(instantVelocity) > 6.0 {
+                        kickHighRateIfNeeded()
+                    }
 
                     let isMovingDownward = smoothedAngularVelocity < -18
                     let isMovingUpward = smoothedAngularVelocity > 24
                     if isMovingDownward {
                         isActivelyClosing = true
-                        stationaryFrames = 0
+                        stationarySince = nil
                     } else if isMovingUpward {
                         isActivelyClosing = false
                         hasPreArmedInThisMotion = false
-                        stationaryFrames = 0
+                        stationarySince = nil
+                        predictorVelocity = 0
                     } else {
-                        stationaryFrames += 1
-                        if stationaryFrames > 12 { // ~200ms of no downward movement
+                        if abs(instantVelocity) > 2.5 {
+                            stationarySince = nil
+                        } else if stationarySince == nil {
+                            stationarySince = nowTime
+                        } else if let stationarySince,
+                                  nowTime - stationarySince > 0.2 {
                             isActivelyClosing = false
+                            predictorVelocity = 0
                         }
                     }
                 } else {
                     resetPredictor(to: angle)
                     predictorSampleTime = sample.time
+                    stationarySince = nil
                 }
 
                 // If lid is safely open, reset pre-arm latch and mark capture engine dormant
@@ -563,6 +647,7 @@ public final class LidSensor {
             }
         }
         
+        adaptPollInterval(angle: currentRawAngle)
         onTurnUpdate?(displayTurn, currentRawAngle)
     }
 }
